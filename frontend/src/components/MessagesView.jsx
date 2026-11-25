@@ -5,15 +5,17 @@ import {
   UserCheck, UserX, AlertCircle, ShieldAlert, Flag,
   Info, Maximize2, Minimize2, Paperclip, BellOff,
   User, FileText, ChevronRight, Ban, RotateCcw, ExternalLink, X, ZoomIn, Link as LinkIcon, Download,
-  PhoneMissed, PhoneOff, Users, UserPlus, Camera, Pencil, Calendar
+  PhoneMissed, PhoneOff, Users, UserPlus, Camera, Pencil, Calendar,
+  Crown, ShieldCheck, UserMinus, Play, Eye
 } from 'lucide-react';
 import { messageService } from '../services/messageService';
 import { authService } from '../services/authService';
 import { DEFAULT_AVATAR } from '../constants/defaults';
 import { extractSharedMediaAndLinks, formatFileSize, validateFileAttachment } from '../utils/messageMediaLogic';
-import { fetchStories, fetchUserStoriesApi } from '../api/client';
+import { fetchStories, fetchUserStoriesApi, fetchStoryByIdApi, fetchStoryArchiveApi } from '../api/client';
 import VideoCallModal from './VideoCallModal';
 import CreateGroupModal from './CreateGroupModal';
+import AddGroupMemberModal from './AddGroupMemberModal';
 import GroupVideoCallModal from './GroupVideoCallModal';
 import {
   CALL_STATUS,
@@ -25,7 +27,7 @@ import {
   stopMediaStream,
   applyVideoTrackToPeer
 } from '../utils/callMediaLogic';
-import { FaceFilterManager } from '../utils/faceFilterLogic';
+import { FaceFilterManager, preloadFaceFilterAi } from '../utils/faceFilterLogic';
 import { MeshCallManager } from '../utils/meshCallManager';
 import { useTranslation } from '../utils/i18n';
 import { formatRelativeTime } from '../utils/timeAgo';
@@ -67,6 +69,160 @@ function createAuthenticatedRealtimeSocket(wsUrl, userId) {
     'nexussocial',
     `bearer.${token}`,
   ]);
+}
+
+function parseStoryMessage(msg, currentUser, partnerUser) {
+  const rawText = typeof msg?.text === 'string' ? msg.text.trim() : '';
+  if (!rawText) return null;
+
+  const isMe = msg?.senderId === 'current';
+
+  // 1. Định dạng chuẩn mới: [STORY_REF:{...}]\n...
+  if (rawText.startsWith('[STORY_REF:')) {
+    const firstNewline = rawText.indexOf(']\n');
+    const hasBody = firstNewline !== -1;
+    const jsonEndIdx = hasBody ? firstNewline : (rawText.endsWith(']') ? rawText.length - 1 : -1);
+    if (jsonEndIdx > 11) {
+      const jsonStr = rawText.slice(11, jsonEndIdx);
+      const replyText = hasBody ? rawText.slice(firstNewline + 2).trim() : '';
+      try {
+        const parsed = JSON.parse(jsonStr);
+        return {
+          kind: parsed.kind || 'reply', // 'reply' | 'mention' | 'share' | 'qa'
+          storyId: parsed.storyId ? String(parsed.storyId) : null,
+          authorId: parsed.authorId ? String(parsed.authorId) : null,
+          authorName: parsed.authorName || null,
+          authorUsername: parsed.authorUsername || null,
+          mentionedUserId: parsed.mentionedUserId ? String(parsed.mentionedUserId) : null,
+          mentionedUsername: parsed.mentionedUsername || null,
+          storyType: parsed.storyType || 'image',
+          mediaUrl: parsed.mediaUrl || msg.mediaUrl || null,
+          textContent: parsed.textContent || null,
+          bgStyle: parsed.bgStyle || null,
+          question: parsed.question || null,
+          expiresAt: parsed.expiresAt || null,
+          createdAt: parsed.createdAt || msg.createdAt || null,
+          replyText,
+          isLegacy: false,
+        };
+      } catch {
+        // fallback to legacy parsing below
+      }
+    }
+  }
+
+  // 2. Định dạng Legacy: Gắn thẻ bạn bè (@mention) kèm link ?storyId=259
+  const mentionMatch = rawText.match(/nhắc đến bạn trong một tin mới trên Story!.*?\?(?:storyId|story)=(\d+)/i);
+  if (mentionMatch) {
+    return {
+      kind: 'mention',
+      storyId: String(mentionMatch[1]),
+      authorId: isMe ? String(currentUser?.id || '') : String(partnerUser?.id || msg?.senderId || ''),
+      authorName: isMe ? (currentUser?.name || 'Bạn') : (partnerUser?.name || msg?.senderName || 'Người dùng'),
+      mentionedUsername: isMe
+        ? (partnerUser?.username || partnerUser?.name || 'bạn bè')
+        : (currentUser?.username || currentUser?.name || 'bạn'),
+      storyType: 'image',
+      mediaUrl: msg.mediaUrl || null,
+      textContent: null,
+      bgStyle: null,
+      expiresAt: null,
+      createdAt: msg.createdAt || null,
+      replyText: '',
+      isLegacy: true,
+    };
+  }
+
+  // 3. Định dạng Legacy: Chia sẻ tin kèm link ?story=259 hoặc ?storyId=259
+  const shareMatch = rawText.match(/(?:Xem tin của (.*?) nhé:|🔗 Tin của (.*?):)[\s\S]*?\?(?:storyId|story)=(\d+)/i);
+  if (shareMatch) {
+    const authorName = (shareMatch[1] || shareMatch[2] || 'thành viên').trim();
+    const firstLine = rawText.split('\n')[0]?.trim() || '';
+    const caption =
+      firstLine && !firstLine.startsWith('Xem tin của') && !firstLine.startsWith('🔗')
+        ? firstLine
+        : '';
+    return {
+      kind: 'share',
+      storyId: String(shareMatch[3]),
+      authorId: null,
+      authorName,
+      storyType: 'image',
+      mediaUrl: msg.mediaUrl || null,
+      textContent: null,
+      bgStyle: null,
+      expiresAt: null,
+      createdAt: msg.createdAt || null,
+      replyText: caption,
+      isLegacy: true,
+    };
+  }
+
+  // 4. Định dạng Legacy: [Trả lời tin: "..."] ... hoặc [Trả lời tin] ...
+  const replyMatch = rawText.match(/^\[Trả lời tin(?::\s*"([^"]*)")?\]\s*([\s\S]*)$/i);
+  if (replyMatch) {
+    return {
+      kind: 'reply',
+      storyId: null,
+      authorId: isMe ? String(partnerUser?.id || '') : String(currentUser?.id || ''),
+      authorName: isMe ? (partnerUser?.name || 'Người dùng') : (currentUser?.name || 'Bạn'),
+      storyType: msg.mediaUrl ? 'image' : 'text',
+      mediaUrl: msg.mediaUrl || null,
+      textContent: replyMatch[1] ? replyMatch[1].trim() : null,
+      bgStyle: null,
+      expiresAt: null,
+      createdAt: msg.createdAt || null,
+      replyText: (replyMatch[2] || '').trim(),
+      isLegacy: true,
+    };
+  }
+
+  // 5. Định dạng Legacy: [Story Q&A: "..."]\n...
+  const qaMatch = rawText.match(/^\[Story Q&A:\s*"([^"]*)"\]\s*([\s\S]*)$/i);
+  if (qaMatch) {
+    return {
+      kind: 'qa',
+      storyId: null,
+      authorId: isMe ? String(partnerUser?.id || '') : String(currentUser?.id || ''),
+      question: qaMatch[1] ? qaMatch[1].trim() : 'Hỏi tôi bất cứ điều gì',
+      storyType: msg.mediaUrl ? 'image' : 'text',
+      mediaUrl: msg.mediaUrl || null,
+      textContent: null,
+      bgStyle: null,
+      expiresAt: null,
+      createdAt: msg.createdAt || null,
+      replyText: (qaMatch[2] || '').trim(),
+      isLegacy: true,
+    };
+  }
+
+  return null;
+}
+
+function formatConversationPreviewText(rawText) {
+  if (!rawText || typeof rawText !== 'string') return rawText || '';
+  const trimmed = rawText.trim();
+  if (trimmed.startsWith('[STORY_REF:')) {
+    const parsed = parseStoryMessage({ text: trimmed, senderId: 'other' }, null, null);
+    if (parsed) {
+      if (parsed.kind === 'mention') return '📸 Đã nhắc đến trong tin';
+      if (parsed.kind === 'share') return parsed.replyText ? `📩 Đã chia sẻ tin: ${parsed.replyText}` : '📩 Đã chia sẻ một tin';
+      if (parsed.kind === 'qa') return `💬 Trả lời Q&A: ${parsed.replyText || ''}`.trim();
+      return `💬 Đã trả lời tin: ${parsed.replyText || ''}`.trim();
+    }
+  }
+  if (/nhắc đến bạn trong một tin mới trên Story!/i.test(trimmed)) {
+    return '📸 Đã nhắc đến trong tin';
+  }
+  const legacyReply = trimmed.match(/^\[Trả lời tin(?::\s*"[^"]*")?\]\s*([\s\S]*)$/i);
+  if (legacyReply) {
+    return `💬 Đã trả lời tin: ${(legacyReply[1] || '').trim()}`;
+  }
+  const legacyQa = trimmed.match(/^\[Story Q&A:\s*"[^"]*"\]\s*([\s\S]*)$/i);
+  if (legacyQa) {
+    return `💬 Trả lời Q&A: ${(legacyQa[1] || '').trim()}`;
+  }
+  return rawText;
 }
 
 function FormattedMessageText({ text, isMe }) {
@@ -209,7 +365,8 @@ export default function MessagesView({
   onRequireAuth,
   onOpenProfile,
   onOpenStoryViewer,
-  onUnreadCountChange
+  onUnreadCountChange,
+  onMobileChatStateChange
 }) {
   const { t, isEn } = useTranslation();
   if (!currentUser) {
@@ -268,9 +425,17 @@ export default function MessagesView({
   const [searchTerm, setSearchTerm] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [mobileShowChat, setMobileShowChat] = useState(false);
+
+  useEffect(() => {
+    onMobileChatStateChange?.(mobileShowChat);
+  }, [mobileShowChat, onMobileChatStateChange]);
   
   // Modal tạo nhóm chat mới
   const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
+  // Modal thêm thành viên vào nhóm chat hiện tại
+  const [showAddMemberModal, setShowAddMemberModal] = useState(false);
+  // Menu thao tác với thành viên trong nhóm (bầu phó nhóm, kick thành viên)
+  const [memberActionMenuId, setMemberActionMenuId] = useState(null);
 
   // Trạng thái cập nhật thông tin nhóm (Tên nhóm, Ảnh nhóm)
   const [isEditingGroupName, setIsEditingGroupName] = useState(false);
@@ -381,8 +546,72 @@ export default function MessagesView({
   const isBlocked = currentConversation?.status === 'blocked';
   const isBlockedByMe = isBlocked && String(currentConversation?.blockedBy) === String(currentUser?.id);
 
-  // File, Ảnh & Liên kết đã gửi trong cuộc trò chuyện hiện tại
-  const { media: sharedMedia, links: sharedLinks } = extractSharedMediaAndLinks(activeMessages);
+  // File, Ảnh & Liên kết đã gửi trong cuộc trò chuyện hiện tại (loại bỏ các tin nhắn tham chiếu Story để không làm rác kho ảnh/link)
+  const nonStoryMessages = useMemo(
+    () => activeMessages.filter(m => !parseStoryMessage(m, currentUser, currentConversation?.user)),
+    [activeMessages, currentUser, currentConversation?.user]
+  );
+  const { media: sharedMedia, links: sharedLinks } = extractSharedMediaAndLinks(nonStoryMessages);
+
+  // Bộ nhớ đệm thông tin chi tiết của các Story được tham chiếu trong tin nhắn (bao gồm kiểm tra hết hạn & quyền chủ tin)
+  const [storyDetailsCache, setStoryDetailsCache] = useState({});
+  const [myArchiveStories, setMyArchiveStories] = useState([]);
+  const archiveLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (!activeMessages.length || !currentUser) return;
+
+    const partnerUser = currentConversation?.user;
+    const missingStoryIds = new Set();
+    let needsMyArchive = false;
+
+    for (const msg of activeMessages) {
+      if (msg.isRecalled) continue;
+      const meta = parseStoryMessage(msg, currentUser, partnerUser);
+      if (!meta) continue;
+
+      if (meta.storyId && storyDetailsCache[meta.storyId] === undefined) {
+        missingStoryIds.add(String(meta.storyId));
+      }
+      if (!meta.storyId && String(meta.authorId) === String(currentUser.id)) {
+        needsMyArchive = true;
+      }
+    }
+
+    missingStoryIds.forEach((sid) => {
+      // Đánh dấu đang tải để tránh gọi trùng
+      setStoryDetailsCache((prev) => (prev[sid] !== undefined ? prev : { ...prev, [sid]: { loading: true } }));
+      fetchStoryByIdApi(sid)
+        .then((res) => {
+          const data = res?.data;
+          if (data) {
+            setStoryDetailsCache((prev) => ({ ...prev, [sid]: data }));
+          } else {
+            setStoryDetailsCache((prev) => ({
+              ...prev,
+              [sid]: { isDeleted: true, isExpired: true, canView: false },
+            }));
+          }
+        })
+        .catch(() => {
+          setStoryDetailsCache((prev) => ({
+            ...prev,
+            [sid]: { isDeleted: true, isExpired: true, canView: false },
+          }));
+        });
+    });
+
+    if (needsMyArchive && !archiveLoadedRef.current) {
+      archiveLoadedRef.current = true;
+      fetchStoryArchiveApi(50, 0)
+        .then((res) => {
+          if (Array.isArray(res?.data)) {
+            setMyArchiveStories(res.data);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeMessages, currentUser, currentConversation?.user, storyDetailsCache]);
 
   // Tự động nạp story của đối tác trò chuyện nếu họ là người lạ (chưa có trong storyTrays bạn bè)
   useEffect(() => {
@@ -444,7 +673,7 @@ export default function MessagesView({
                 bio: `${c.member_count || (c.members?.length || 0)} thành viên`,
                 lastSeen: 'Vừa xong'
               },
-              lastMessage: c.last_message || (isGroup ? 'Bắt đầu cuộc trò chuyện nhóm' : (c.user?.is_friend ? 'Bắt đầu cuộc trò chuyện' : '')),
+              lastMessage: formatConversationPreviewText(c.last_message) || (isGroup ? 'Bắt đầu cuộc trò chuyện nhóm' : (c.user?.is_friend ? 'Bắt đầu cuộc trò chuyện' : '')),
               lastTime: c.last_message_at ? new Date(c.last_message_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'Vừa xong',
               unreadCount: c.unread_count || 0,
               messages: existing ? (existing.messages || []) : []
@@ -604,9 +833,12 @@ export default function MessagesView({
 
     let ws = null;
     let pingInterval = null;
+    let connectTimer = null;
+    let retryTimer = null;
     let isMounted = true;
 
     const connectWs = () => {
+      if (!isMounted || !authService.getToken()) return;
       try {
         const wsUrl = getWsBaseUrl();
         ws = createAuthenticatedRealtimeSocket(wsUrl, currentUser.id);
@@ -685,17 +917,20 @@ export default function MessagesView({
                   loadServerConversations(false);
                   return prev;
                 }
+                const isStoryRefMsg = typeof msg.content === 'string' && Boolean(parseStoryMessage({ text: msg.content, senderId: 'other' }, null, null));
                 const displayMsg = msg.is_recalled 
                   ? 'Tin nhắn đã được thu hồi' 
-                  : (msg.media_type === 'system'
-                      ? msg.content
-                      : (msg.media_url && msg.media_type === 'image' 
-                          ? ('[Hình ảnh] ' + (msg.content || '')) 
-                          : (msg.media_url && msg.media_type === 'file' 
-                              ? ('[Tệp tin] ' + (msg.content || '')) 
-                              : (msg.media_type === 'call_log'
-                                  ? ('[Cuộc gọi] ' + (msg.content || ''))
-                                  : msg.content))));
+                  : isStoryRefMsg
+                    ? formatConversationPreviewText(msg.content)
+                    : (msg.media_type === 'system'
+                        ? msg.content
+                        : (msg.media_url && msg.media_type === 'image' 
+                            ? ('[Hình ảnh] ' + (msg.content || '')) 
+                            : (msg.media_url && msg.media_type === 'file' 
+                                ? ('[Tệp tin] ' + (msg.content || '')) 
+                                : (msg.media_type === 'call_log'
+                                    ? ('[Cuộc gọi] ' + (msg.content || ''))
+                                    : formatConversationPreviewText(msg.content)))));
                 return prev.map((c) => {
                   if (String(c.id) === convIdStr) {
                     const isCurrentChat = String(selectedConversationIdRef.current) === convIdStr;
@@ -733,6 +968,13 @@ export default function MessagesView({
                 }
                 return c;
               }));
+            } else if (data.type === 'MEMBER_KICKED') {
+              const convIdStr = String(data.conversation_id);
+              setConversations((prev) => prev.filter((c) => String(c.id) !== convIdStr));
+              if (String(selectedConversationIdRef.current) === convIdStr) {
+                setSelectedConversationId(null);
+                alert('Bạn đã bị xóa khỏi nhóm trò chuyện này.');
+              }
             } else if (data.type === 'MESSAGE_RECALLED') {
               const msgId = data.message_id;
               const convIdStr = String(data.conversation_id);
@@ -1043,30 +1285,37 @@ export default function MessagesView({
         wsMessageDispatcherRef.current = handleWsMessage;
         ws.onmessage = handleWsMessage;
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           setIsWsConnected(false);
           clearInterval(pingInterval);
           wsRef.current = null;
+          if (event?.code === 4401 || !authService.getToken()) {
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('wings:session-expired'));
+            }
+            return;
+          }
           if (isMounted) {
-            setTimeout(connectWs, 3000);
+            retryTimer = setTimeout(connectWs, 3000);
           }
         };
 
         ws.onerror = () => {
           setIsWsConnected(false);
-          ws?.close();
         };
       } catch (err) {
         console.warn('Lỗi khởi tạo WebSocket tin nhắn:', err);
       }
     };
 
-    connectWs();
+    connectTimer = setTimeout(connectWs, 50);
 
     return () => {
       isMounted = false;
+      clearTimeout(connectTimer);
+      clearTimeout(retryTimer);
       clearInterval(pingInterval);
-      if (ws) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
     };
@@ -1294,6 +1543,7 @@ export default function MessagesView({
   const startCall = async (type = 'video') => {
     const targetUser = currentConversation?.user;
     if (!targetUser?.id || !currentUser?.id || isBlocked) return;
+    if (type === 'video') preloadFaceFilterAi();
 
     // Tự động thử kết nối lại nếu WebSocket chưa sẵn sàng
     const isWsReady = await ensureWebSocketReady();
@@ -1552,6 +1802,7 @@ export default function MessagesView({
 
   const startGroupCall = async (conversationId) => {
     if (!conversationId) return;
+    preloadFaceFilterAi();
 
     // 1. Kiểm tra trạng thái hiện tại trên local: nếu đang có cuộc gọi thì chuyển ngay sang tham gia
     const localStatus = activeGroupCallsStatus[conversationId] || activeGroupCallsStatus[String(conversationId)];
@@ -1685,6 +1936,7 @@ export default function MessagesView({
 
   const joinGroupCall = async (conversationId) => {
     if (!conversationId) return;
+    preloadFaceFilterAi();
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
         alert('Trình duyệt không hỗ trợ truy cập camera/mic.');
@@ -1814,9 +2066,13 @@ export default function MessagesView({
   const handleToggleGroupCamera = () => {
     const next = !isGroupVideoOff;
     setIsGroupVideoOff(next);
-    toggleMediaTrack(groupLocalStream, 'video', !next);
+    // Luôn bật/tắt camera vật lý thực tế
     if (groupRawCameraStreamRef.current) {
       toggleMediaTrack(groupRawCameraStreamRef.current, 'video', !next);
+    }
+    // Chỉ tắt/bật groupLocalStream nếu KHÔNG đang chia sẻ màn hình (để không làm tắt luồng chia sẻ màn hình)
+    if (!isGroupScreenSharing) {
+      toggleMediaTrack(groupLocalStream, 'video', !next);
     }
   };
 
@@ -1879,15 +2135,19 @@ export default function MessagesView({
       const rawStream = groupRawCameraStreamRef.current;
       const cameraVideoTrack = rawStream?.getVideoTracks ? rawStream.getVideoTracks()[0] : null;
 
-      if (cameraVideoTrack && meshCallManagerRef.current) {
-        await meshCallManagerRef.current.replaceVideoTrack(cameraVideoTrack);
-        if (rawStream) {
-          meshCallManagerRef.current.setLocalStream(rawStream);
+      if (cameraVideoTrack) {
+        // Đảm bảo trạng thái camera giữ nguyên cài đặt của người dùng
+        cameraVideoTrack.enabled = !isGroupVideoOff;
+        if (meshCallManagerRef.current) {
+          await meshCallManagerRef.current.replaceVideoTrack(cameraVideoTrack);
+          if (rawStream) {
+            meshCallManagerRef.current.setLocalStream(rawStream);
+          }
+          meshCallManagerRef.current.broadcastSignal({
+            type: 'SCREEN_SHARE_CHANGE',
+            is_sharing: false
+          });
         }
-        meshCallManagerRef.current.broadcastSignal({
-          type: 'SCREEN_SHARE_CHANGE',
-          is_sharing: false
-        });
       }
       if (rawStream) {
         setGroupLocalStream(rawStream);
@@ -2113,13 +2373,22 @@ export default function MessagesView({
 
   // Chọn hội thoại và đánh dấu đã xem
   const handleSelectConversation = (convId) => {
-    if (String(convId) === String(selectedConversationId)) return;
-    // Hủy bỏ trạng thái draft khi người dùng chuyển sang chat khác mà không gửi gì
+    // Luôn mở giao diện chat trên mobile khi người dùng nhấn vào bất kỳ cuộc trò chuyện nào
     setDraftConversation(null);
+    setMobileShowChat(true);
 
     const strId = String(convId);
+    if (strId === String(selectedConversationId)) {
+      // Đã chọn cuộc trò chuyện này, đảm bảo cuộn xuống tin nhắn mới nhất
+      setTimeout(() => {
+        if (messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+        }
+      }, 50);
+      return;
+    }
+
     setSelectedConversationId(strId);
-    setMobileShowChat(true);
 
     const existing = conversations.find(c => String(c.id) === strId);
     if (existing && existing.messages && existing.messages.length > 0) {
@@ -2372,6 +2641,35 @@ export default function MessagesView({
     }
   };
 
+  // Cập nhật vai trò thành viên nhóm (Bổ nhiệm / Thu hồi Phó nhóm)
+  const handleUpdateMemberRole = async (targetUserId, newRole) => {
+    if (!currentConversation?.id) return;
+    try {
+      const updated = await messageService.updateMemberRole(currentConversation.id, targetUserId, newRole);
+      if (updated) {
+        setConversations(prev => prev.map(c => String(c.id) === String(updated.id) ? { ...c, ...updated } : c));
+      }
+    } catch (err) {
+      alert(err.message || 'Lỗi khi cập nhật vai trò');
+    }
+  };
+
+  // Xóa thành viên khỏi nhóm (Kick)
+  const handleKickMember = async (targetUserId, targetName) => {
+    if (!currentConversation?.id) return;
+    if (!window.confirm(`Bạn có chắc chắn muốn xóa "${targetName || 'thành viên này'}" khỏi nhóm trò chuyện?`)) {
+      return;
+    }
+    try {
+      const updated = await messageService.removeMember(currentConversation.id, targetUserId);
+      if (updated) {
+        setConversations(prev => prev.map(c => String(c.id) === String(updated.id) ? { ...c, ...updated } : c));
+      }
+    } catch (err) {
+      alert(err.message || 'Lỗi khi xóa thành viên khỏi nhóm');
+    }
+  };
+
   // Xử lý gửi tin nhắn (Bằng nút Gửi hoặc phím Enter, hỗ trợ ảnh, tài liệu và văn bản)
   const handleSendMessage = async (e) => {
     e?.preventDefault();
@@ -2595,10 +2893,10 @@ export default function MessagesView({
 
   return (
     <main className={`w-full h-full min-h-0 flex flex-col overflow-hidden transition-all duration-200 ${
-      isEdgeToEdge ? 'p-0' : 'p-2 sm:p-3 lg:p-4'
+      isEdgeToEdge ? 'p-0' : 'p-0 sm:p-2 lg:p-4'
     }`}>
-      <div className={`bg-white dark:bg-slate-900 shadow-sm border border-slate-200/90 dark:border-slate-800 h-full w-full flex min-h-0 overflow-hidden ${
-        isEdgeToEdge ? 'rounded-none border-x-0 border-b-0' : 'rounded-2xl sm:rounded-3xl'
+      <div className={`bg-white dark:bg-slate-900 shadow-sm h-full w-full flex min-h-0 overflow-hidden ${
+        isEdgeToEdge ? 'rounded-none border-x-0 border-b-0' : 'rounded-none sm:rounded-2xl lg:rounded-3xl border-0 sm:border border-slate-200/90 dark:border-slate-800'
       }`}>
         
         {/* ================= CỘT TRÁI: DANH SÁCH CUỘC TRÒ CHUYỆN ================= */}
@@ -2708,7 +3006,7 @@ export default function MessagesView({
           </div>
 
           {/* VÙNG CUỘN ĐỘC LẬP: DANH SÁCH CÁC CUỘC TRÒ CHUYỆN */}
-          <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-50 dark:divide-slate-800/60 overscroll-contain">
+          <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-50 dark:divide-slate-800/60 overscroll-contain pb-20 md:pb-0">
             {displayedConversations.length === 0 ? (
               <div className="p-8 text-center text-slate-400 text-sm">
                 {inboxTab === 'main' ? (
@@ -2960,6 +3258,10 @@ export default function MessagesView({
                         <span className="px-1.5 py-0.5 bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800 rounded text-[10px] font-bold">
                           Nhóm
                         </span>
+                      ) : currentConversation.user?.isFriend ? (
+                        <span className="px-1.5 py-0.5 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 rounded text-[10px] font-bold">
+                          Bạn bè
+                        </span>
                       ) : currentConversation.status === 'pending' ? (
                         <span className="px-1.5 py-0.5 bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800 rounded text-[10px] font-bold">
                           Người lạ
@@ -3033,6 +3335,19 @@ export default function MessagesView({
                         <span className="text-xs font-semibold hidden md:inline">Gọi nhóm</span>
                       </button>
                     )
+                  )}
+
+                  {/* Nút Thêm thành viên vào nhóm chat */}
+                  {currentConversation.type === 'group' && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAddMemberModal(true)}
+                      title="Thêm thành viên vào nhóm trò chuyện"
+                      className="p-2 hover:bg-blue-50 dark:hover:bg-blue-950/40 hover:text-blue-600 dark:hover:text-blue-400 rounded-xl transition cursor-pointer text-slate-500 dark:text-slate-400 flex items-center gap-1"
+                    >
+                      <UserPlus className="w-4 h-4 sm:w-5 sm:h-5 text-blue-600 dark:text-blue-400" />
+                      <span className="text-xs font-semibold text-blue-600 dark:text-blue-400 hidden sm:inline">Thêm người</span>
+                    </button>
                   )}
 
                   {/* Nút Báo cáo cuộc trò chuyện */}
@@ -3462,7 +3777,290 @@ export default function MessagesView({
                                   </button>
                                 </div>
                               );
-                            })() : (
+                            })() : (() => {
+                              const storyMeta = parseStoryMessage(msg, currentUser, currentConversation?.user);
+                              if (!storyMeta) return null;
+
+                              const cachedStory = storyMeta.storyId ? storyDetailsCache[storyMeta.storyId] : null;
+                              const isLoadingStory = Boolean(cachedStory?.loading);
+                              const fetchedStory = cachedStory && !cachedStory.loading ? cachedStory : null;
+
+                              // Xác định chủ sở hữu của Story được tham chiếu
+                              const storyAuthorId = String(
+                                fetchedStory?.author?.id ||
+                                  storyMeta.authorId ||
+                                  (storyMeta.kind === 'mention'
+                                    ? (isMe ? currentUser?.id : currentConversation?.user?.id)
+                                    : (isMe ? currentConversation?.user?.id : currentUser?.id)) ||
+                                  ''
+                              );
+                              const isStoryOwner = Boolean(storyAuthorId && String(storyAuthorId) === String(currentUser?.id));
+
+                              // Tra cứu Story trong storyTrays (đang hoạt động) hoặc kho lưu trữ cá nhân (myArchiveStories) cho cả tin nhắn mới & cũ
+                              const authorTray = storyTrays.find((t) => String(t.author?.id) === storyAuthorId);
+                              const activeAuthorStories = Array.isArray(authorTray?.stories) ? authorTray.stories : [];
+                              const candidatePool = [
+                                ...activeAuthorStories,
+                                ...(isStoryOwner ? myArchiveStories : []),
+                              ];
+
+                              let matchedStory = null;
+                              if (storyMeta.storyId) {
+                                matchedStory = candidatePool.find((s) => String(s.id) === String(storyMeta.storyId)) || null;
+                              }
+                              if (!matchedStory && storyMeta.mediaUrl) {
+                                matchedStory = candidatePool.find((s) => s.mediaUrl && s.mediaUrl === storyMeta.mediaUrl) || null;
+                              }
+                              if (!matchedStory && storyMeta.textContent) {
+                                const cleanTarget = storyMeta.textContent.replace(/\.{3}$/, '').trim().toLowerCase();
+                                if (cleanTarget) {
+                                  matchedStory =
+                                    candidatePool.find(
+                                      (s) => s.textContent && s.textContent.trim().toLowerCase().startsWith(cleanTarget)
+                                    ) || null;
+                                }
+                              }
+                              if (!matchedStory && !storyMeta.storyId && msg.createdAt && candidatePool.length > 0) {
+                                const msgTime = new Date(msg.createdAt).getTime();
+                                if (!isNaN(msgTime)) {
+                                  // Tìm story được tạo trước thời điểm phản hồi (trong vòng 24 giờ trước đó)
+                                  matchedStory =
+                                    candidatePool.find((s) => {
+                                      const sTime = new Date(s.createdAt).getTime();
+                                      return !isNaN(sTime) && sTime <= msgTime + 60000 && msgTime - sTime <= 24 * 60 * 60 * 1000;
+                                    }) || (isStoryOwner ? candidatePool[0] : null);
+                                }
+                              }
+
+                              const resolvedStoryId =
+                                fetchedStory?.id || matchedStory?.id || storyMeta.storyId || null;
+
+                              const isDeleted = Boolean(fetchedStory?.isDeleted);
+                              const resolvedExpiresAt =
+                                fetchedStory?.expiresAt || matchedStory?.expiresAt || storyMeta.expiresAt || null;
+
+                              let isExpired = false;
+                              if (fetchedStory) {
+                                isExpired = Boolean(
+                                  fetchedStory.isExpired ||
+                                    (fetchedStory.expiresAt && new Date(fetchedStory.expiresAt).getTime() <= Date.now())
+                                );
+                              } else if (matchedStory) {
+                                isExpired = Boolean(
+                                  matchedStory.isArchived ||
+                                    (matchedStory.expiresAt && new Date(matchedStory.expiresAt).getTime() <= Date.now())
+                                );
+                              } else if (resolvedExpiresAt) {
+                                isExpired = new Date(resolvedExpiresAt).getTime() <= Date.now();
+                              } else if (storyMeta.isLegacy && !storyMeta.storyId) {
+                                // Tin nhắn cũ không có storyId và không khớp với tin đang hoạt động nào
+                                const msgAgeMs = msg.createdAt ? Date.now() - new Date(msg.createdAt).getTime() : Infinity;
+                                isExpired = msgAgeMs >= 24 * 60 * 60 * 1000 || !matchedStory;
+                              }
+
+                              // Quyền xem: Tin chưa hết hạn HOẶC người xem chính là chủ sở hữu của tin chưa bị xóa
+                              const canViewStory = Boolean(
+                                !isDeleted &&
+                                  resolvedStoryId &&
+                                  (!isExpired || isStoryOwner) &&
+                                  fetchedStory?.canView !== false
+                              );
+
+                              const previewStoryType =
+                                fetchedStory?.storyType || matchedStory?.storyType || storyMeta.storyType || 'image';
+                              const previewMediaUrl =
+                                fetchedStory?.mediaUrl || matchedStory?.mediaUrl || storyMeta.mediaUrl || null;
+                              const previewTextContent =
+                                fetchedStory?.textContent || matchedStory?.textContent || storyMeta.textContent || '';
+                              const previewBgStyle =
+                                fetchedStory?.backgroundStyle || matchedStory?.backgroundStyle || storyMeta.bgStyle || null;
+
+                              const partnerUsername =
+                                storyMeta.mentionedUsername ||
+                                currentConversation?.user?.username ||
+                                currentConversation?.user?.name ||
+                                'bạn bè';
+
+                              const headerLabel =
+                                storyMeta.kind === 'mention'
+                                  ? isMe
+                                    ? `Bạn đã nhắc đến @${partnerUsername} trong tin của mình`
+                                    : 'Đã nhắc đến bạn trong tin của mình'
+                                  : storyMeta.kind === 'share'
+                                    ? isMe
+                                      ? `Bạn đã chia sẻ tin của ${storyMeta.authorName || 'thành viên'}`
+                                      : `Đã chia sẻ tin của ${storyMeta.authorName || 'thành viên'}`
+                                    : storyMeta.kind === 'qa'
+                                      ? isMe
+                                        ? 'Bạn đã trả lời câu hỏi trên tin của họ'
+                                        : 'Đã trả lời câu hỏi trên tin của bạn'
+                                      : isMe
+                                        ? `Bạn đã trả lời tin của ${isStoryOwner ? 'mình' : 'họ'}`
+                                        : 'Đã trả lời tin của bạn';
+
+                              const handleClickStoryCard = () => {
+                                if (!canViewStory || !resolvedStoryId || !onOpenStoryViewer) return;
+                                onOpenStoryViewer({
+                                  storyId: resolvedStoryId,
+                                  userId: storyAuthorId || undefined,
+                                  initialShowViewers: false,
+                                });
+                              };
+
+                              return (
+                                <div
+                                  className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[280px] sm:max-w-[320px]`}
+                                  title={fullTimeTooltip}
+                                >
+                                  {/* Dòng tiêu đề nhỏ chuẩn Instagram */}
+                                  <span
+                                    className={`text-[11px] sm:text-xs text-slate-400 dark:text-slate-500 mb-1 px-0.5 select-none ${
+                                      isMe ? 'text-right' : 'text-left'
+                                    }`}
+                                  >
+                                    {headerLabel}
+                                  </span>
+
+                                  {/* Trạng thái 1: Tin còn hạn (<24h) -> Hiển thị Mini Story Card 9:16 + thanh dọc bên cạnh */}
+                                  {!isExpired && !isDeleted && (resolvedStoryId || !isLoadingStory) ? (
+                                    <div
+                                      className={`flex items-stretch gap-2 ${
+                                        isMe ? 'flex-row' : 'flex-row-reverse'
+                                      }`}
+                                    >
+                                      <div
+                                        onClick={handleClickStoryCard}
+                                        role={canViewStory ? 'button' : undefined}
+                                        tabIndex={canViewStory ? 0 : -1}
+                                        onKeyDown={(e) => {
+                                          if (canViewStory && (e.key === 'Enter' || e.key === ' ')) {
+                                            e.preventDefault();
+                                            handleClickStoryCard();
+                                          }
+                                        }}
+                                        className={`relative w-[132px] h-[226px] sm:w-[142px] sm:h-[244px] rounded-2xl overflow-hidden shadow-md border border-slate-200/70 dark:border-slate-700/70 select-none group/storycard ${
+                                          canViewStory ? 'cursor-pointer' : 'cursor-default'
+                                        }`}
+                                        style={{
+                                          background:
+                                            previewBgStyle?.background ||
+                                            'linear-gradient(145deg, #1e293b 0%, #334155 50%, #0f172a 100%)',
+                                        }}
+                                      >
+                                        {/* Nội dung nền của Mini Story */}
+                                        {previewStoryType === 'video' && previewMediaUrl ? (
+                                          <video
+                                            src={previewMediaUrl}
+                                            muted
+                                            playsInline
+                                            preload="metadata"
+                                            className="w-full h-full object-cover group-hover/storycard:scale-105 transition-transform duration-300"
+                                          />
+                                        ) : previewMediaUrl ? (
+                                          <img
+                                            src={previewMediaUrl}
+                                            alt="Story preview"
+                                            onError={(e) => {
+                                              e.currentTarget.style.display = 'none';
+                                            }}
+                                            className="w-full h-full object-cover group-hover/storycard:scale-105 transition-transform duration-300"
+                                          />
+                                        ) : null}
+
+                                        {/* Lớp phủ gradient nhẹ giúp chữ nổi bật */}
+                                        <div className="absolute inset-0 bg-gradient-to-b from-black/25 via-transparent to-black/65 pointer-events-none" />
+
+                                        {/* Icon Play nếu là Video Story */}
+                                        {previewStoryType === 'video' && (
+                                          <div className="absolute top-2.5 right-2.5 w-6 h-6 rounded-full bg-black/50 backdrop-blur-xs flex items-center justify-center text-white">
+                                            <Play className="w-3 h-3 fill-white ml-0.5" />
+                                          </div>
+                                        )}
+
+                                        {/* Nội dung chữ trên Story (Text Story hoặc Caption trên ảnh) */}
+                                        {previewTextContent && (
+                                          <div className="absolute inset-0 flex items-center justify-center p-3 text-center pointer-events-none">
+                                            <p
+                                              className="text-white text-xs font-bold leading-snug line-clamp-5 drop-shadow-md break-words"
+                                              style={{
+                                                fontFamily: previewBgStyle?.fontFamily || 'inherit',
+                                                color: previewBgStyle?.textColor || '#ffffff',
+                                              }}
+                                            >
+                                              {previewTextContent}
+                                            </p>
+                                          </div>
+                                        )}
+
+                                        {/* Nhãn câu hỏi Q&A nếu là phản hồi Q&A */}
+                                        {storyMeta.kind === 'qa' && storyMeta.question && (
+                                          <div className="absolute top-2.5 inset-x-2 bg-white/95 dark:bg-slate-900/95 rounded-xl px-2 py-1.5 shadow-sm text-center pointer-events-none">
+                                            <span className="block text-[9px] font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400">
+                                              Hỏi & Đáp
+                                            </span>
+                                            <p className="text-[10px] font-semibold text-slate-800 dark:text-slate-100 line-clamp-2">
+                                              {storyMeta.question}
+                                            </p>
+                                          </div>
+                                        )}
+
+                                        {/* Nút/Nhãn dưới chân Mini Story giống Instagram */}
+                                        <div className="absolute bottom-2.5 inset-x-2.5 flex items-center justify-center">
+                                          <span className="w-full py-1.5 px-2.5 rounded-xl bg-white/90 dark:bg-slate-900/90 backdrop-blur-md text-slate-900 dark:text-white text-[11px] font-bold text-center truncate shadow-xs group-hover/storycard:bg-white transition">
+                                            {storyMeta.kind === 'mention' && !isMe
+                                              ? 'Xem tin nhắc đến bạn'
+                                              : 'Nhấn để xem tin'}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      {/* Thanh dọc đặc trưng của Instagram bên cạnh Mini Story */}
+                                      <div className="w-[3.5px] rounded-full bg-slate-300 dark:bg-slate-600 shrink-0 my-0.5" />
+                                    </div>
+                                  ) : (
+                                    /* Trạng thái 2: Tin đã hết hạn (>24h) hoặc đã xóa -> Ẩn Mini Story, chỉ hiện thanh dọc | chuẩn Instagram */
+                                    <div
+                                      className={`flex items-center gap-2.5 py-0.5 ${
+                                        isMe ? 'flex-row' : 'flex-row-reverse'
+                                      }`}
+                                    >
+                                      {isStoryOwner && !isDeleted && resolvedStoryId ? (
+                                        /* Chủ tin vẫn có thể nhấn vào để xem lại tin đã hết hạn (chưa bị xóa) của chính mình */
+                                        <button
+                                          type="button"
+                                          onClick={handleClickStoryCard}
+                                          className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-100 hover:bg-blue-50 dark:bg-slate-800/90 dark:hover:bg-slate-700 text-slate-600 hover:text-blue-600 dark:text-slate-300 dark:hover:text-blue-400 text-xs font-medium transition cursor-pointer border border-slate-200/80 dark:border-slate-700"
+                                          title="Bạn là chủ tin này — nhấn để xem lại trong Kho lưu trữ"
+                                        >
+                                          <Eye className="w-3.5 h-3.5 shrink-0" />
+                                          <span>Tin đã hết hạn • Nhấn để xem</span>
+                                        </button>
+                                      ) : (
+                                        /* Không phải chủ tin (hoặc tin đã bị xóa) -> Không thể xem được tin đã hết hạn của người khác */
+                                        <span className="text-xs sm:text-[13px] font-medium text-slate-500 dark:text-slate-400 select-none">
+                                          Không xem được tin
+                                        </span>
+                                      )}
+                                      <div className="w-[3.5px] h-5 rounded-full bg-slate-300 dark:bg-slate-600 shrink-0" />
+                                    </div>
+                                  )}
+
+                                  {/* Bong bóng nội dung tin nhắn phản hồi nằm ngay bên dưới */}
+                                  {storyMeta.replyText && (
+                                    <div
+                                      className={
+                                        'mt-1.5 px-4 py-2.5 rounded-2xl text-sm leading-relaxed break-words shadow-2xs ' +
+                                        (isMe
+                                          ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-br-xs'
+                                          : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 border border-slate-200/90 dark:border-slate-700/80 rounded-bl-xs')
+                                      }
+                                    >
+                                      <FormattedMessageText text={storyMeta.replyText} isMe={isMe} />
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })() || (
                               <div
                                 title={fullTimeTooltip}
                                 className={
@@ -3750,42 +4348,42 @@ export default function MessagesView({
 
                   <form 
                     onSubmit={handleSendMessage}
-                    className="p-3 sm:p-4 flex items-center gap-2"
+                    className="p-2 sm:p-3 pb-[max(env(safe-area-inset-bottom,0px),8px)] flex items-center gap-1.5 sm:gap-2 shrink-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800"
                   >
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
                       title="Gửi ảnh"
-                      className="p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer"
+                      className="p-1.5 sm:p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer shrink-0"
                     >
-                      <ImageIcon className="w-5 h-5" />
+                      <ImageIcon className="w-4 h-4 sm:w-5 sm:h-5" />
                     </button>
                     <button
                       type="button"
                       onClick={() => docFileInputRef.current?.click()}
                       title="Đính kèm tệp tin"
-                      className="p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer"
+                      className="p-1.5 sm:p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer shrink-0"
                     >
-                      <Paperclip className="w-5 h-5" />
+                      <Paperclip className="w-4 h-4 sm:w-5 sm:h-5" />
                     </button>
                     <button
                       type="button"
                       onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                       title="Biểu tượng cảm xúc"
-                      className={`p-2 rounded-xl transition cursor-pointer ${
+                      className={`p-1.5 sm:p-2 rounded-xl transition cursor-pointer shrink-0 ${
                         showEmojiPicker ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-500' : 'text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800'
                       }`}
                     >
-                      <Smile className="w-5 h-5" />
+                      <Smile className="w-4 h-4 sm:w-5 sm:h-5" />
                     </button>
 
                     <input
                       ref={inputRef}
                       type="text"
                       placeholder={
-                        currentConversation.status === 'pending'
+                        currentConversation.status === 'pending' && currentConversation.initiatedBy !== currentUser?.id
                           ? 'Chấp nhận cuộc trò chuyện để trả lời...'
-                          : ('Nhắn tin cho ' + currentConversation.user.name + '... (Nhấn Enter để gửi)')
+                          : (`Nhắn tin cho ${currentConversation.type === 'group' ? (currentConversation.name || 'nhóm') : currentConversation.user.name}... (Nhấn Enter để gửi)`)
                       }
                       value={inputText}
                       onChange={(e) => setInputText(e.target.value)}
@@ -3797,7 +4395,7 @@ export default function MessagesView({
                           }
                         }
                       }}
-                      className="flex-1 px-4 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-100/80 dark:hover:bg-slate-750 focus:bg-white dark:focus:bg-slate-800 text-sm text-slate-800 dark:text-slate-100 placeholder-slate-400 rounded-full border border-transparent focus:border-blue-400 dark:focus:border-blue-500 focus:ring-4 focus:ring-blue-100 dark:focus:ring-blue-900/30 outline-none transition"
+                      className="flex-1 min-w-0 px-3 sm:px-4 py-2 sm:py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-100/80 dark:hover:bg-slate-750 focus:bg-white dark:focus:bg-slate-800 text-xs sm:text-sm text-slate-800 dark:text-slate-100 placeholder-slate-400 rounded-full border border-transparent focus:border-blue-400 dark:focus:border-blue-500 focus:ring-2 sm:focus:ring-4 focus:ring-blue-100 dark:focus:ring-blue-900/30 outline-none transition"
                     />
 
                     <button
@@ -3805,7 +4403,7 @@ export default function MessagesView({
                       disabled={!inputText.trim() && !selectedImagePreview && !selectedFileAttachment}
                       title={inputText.trim() || selectedImagePreview || selectedFileAttachment ? "Gửi tin nhắn (Enter)" : "Nhập nội dung hoặc đính kèm ảnh/tệp tin để gửi"}
                       className={
-                        'p-2.5 rounded-full text-white transition shadow-sm ' +
+                        'p-2 sm:p-2.5 rounded-full text-white transition shadow-sm shrink-0 ' +
                         (inputText.trim() || selectedImagePreview || selectedFileAttachment
                           ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20 scale-105 cursor-pointer'
                           : 'bg-slate-300 dark:bg-slate-700 cursor-not-allowed opacity-60')
@@ -4029,33 +4627,146 @@ export default function MessagesView({
             </div>
 
             {/* Danh sách thành viên (nếu là nhóm) */}
-            {currentConversation.type === 'group' && currentConversation.members?.length > 0 && (
-              <div className="p-4 border-b border-slate-100 dark:border-slate-800 space-y-2">
-                <div className="flex items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
-                  <span>Thành viên ({currentConversation.members.length})</span>
+            {currentConversation.type === 'group' && currentConversation.members?.length > 0 && (() => {
+              const currentUserIdStr = String(currentUser?.id || '');
+              const isCurrentLeader = (String(currentConversation.initiatedBy) === currentUserIdStr) ||
+                currentConversation.members?.some(mem => String(mem.id) === currentUserIdStr && (mem.role === 'admin' || mem.role === 'leader'));
+              const isCurrentDeputy = !isCurrentLeader && currentConversation.members?.some(mem => String(mem.id) === currentUserIdStr && mem.role === 'deputy');
+
+              return (
+                <div className="p-4 border-b border-slate-100 dark:border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                    <span>Thành viên ({currentConversation.members.length})</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddMemberModal(true)}
+                      className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-semibold flex items-center gap-1 cursor-pointer normal-case"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Thêm người</span>
+                    </button>
+                  </div>
+                  <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                    {currentConversation.members.map((m) => {
+                      const mIdStr = String(m.id);
+                      const isMe = mIdStr === currentUserIdStr;
+                      const isMLeader = (String(currentConversation.initiatedBy) === mIdStr) || m.role === 'admin' || m.role === 'leader';
+                      const isMDeputy = !isMLeader && m.role === 'deputy';
+
+                      const canChangeRole = isCurrentLeader && !isMe && !isMLeader;
+                      const canKick = !isMe && !isMLeader && (isCurrentLeader || (isCurrentDeputy && !isMDeputy));
+                      const hasActions = canChangeRole || canKick;
+
+                      return (
+                        <div key={m.id} className="relative flex items-center gap-2 p-1.5 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800/60 transition">
+                          <img
+                            src={m.avatar || DEFAULT_AVATAR}
+                            alt={m.name}
+                            className="w-7 h-7 rounded-full object-cover ring-1 ring-slate-100 dark:ring-slate-800 shrink-0"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <p className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">{m.name}</p>
+                              {isMLeader && (
+                                <span className="inline-flex items-center gap-0.5 text-[9px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/60 px-1 py-0.2 rounded border border-amber-200/60 dark:border-amber-800/60 shrink-0">
+                                  <Crown className="w-2.5 h-2.5" /> Trưởng nhóm
+                                </span>
+                              )}
+                              {isMDeputy && (
+                                <span className="inline-flex items-center gap-0.5 text-[9px] font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-1 py-0.2 rounded border border-indigo-200/60 dark:border-indigo-800/60 shrink-0">
+                                  <ShieldCheck className="w-2.5 h-2.5" /> Phó nhóm
+                                </span>
+                              )}
+                              {isMe && (
+                                <span className="text-[9px] font-semibold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-1 py-0.2 rounded shrink-0">
+                                  Bạn
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-slate-400 truncate">@{m.username}</p>
+                          </div>
+
+                          {/* Menu thao tác cho Trưởng nhóm / Phó nhóm */}
+                          {hasActions && (
+                            <div className="relative shrink-0">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMemberActionMenuId(memberActionMenuId === m.id ? null : m.id);
+                                }}
+                                className="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg transition cursor-pointer"
+                                title="Thao tác thành viên"
+                              >
+                                <MoreVertical className="w-3.5 h-3.5" />
+                              </button>
+
+                              {memberActionMenuId === m.id && (
+                                <>
+                                  <div
+                                    className="fixed inset-0 z-40"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setMemberActionMenuId(null);
+                                    }}
+                                  />
+                                  <div className="absolute right-0 top-full mt-1 w-44 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-100 dark:border-slate-700 py-1 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
+                                    {canChangeRole && (
+                                      isMDeputy ? (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setMemberActionMenuId(null);
+                                            handleUpdateMemberRole(m.id, 'member');
+                                          }}
+                                          className="w-full px-3 py-1.5 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700/60 flex items-center gap-2 cursor-pointer"
+                                        >
+                                          <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+                                          <span>Thu hồi Phó nhóm</span>
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setMemberActionMenuId(null);
+                                            handleUpdateMemberRole(m.id, 'deputy');
+                                          }}
+                                          className="w-full px-3 py-1.5 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700/60 flex items-center gap-2 cursor-pointer"
+                                        >
+                                          <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
+                                          <span>Bổ nhiệm Phó nhóm</span>
+                                        </button>
+                                      )
+                                    )}
+
+                                    {canKick && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setMemberActionMenuId(null);
+                                          handleKickMember(m.id, m.name);
+                                        }}
+                                        className="w-full px-3 py-1.5 text-left text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 cursor-pointer"
+                                      >
+                                        <UserMinus className="w-3.5 h-3.5" />
+                                        <span>Xóa khỏi nhóm</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
-                  {currentConversation.members.map((m) => (
-                    <div key={m.id} className="flex items-center gap-2.5 p-1.5 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 transition">
-                      <img
-                        src={m.avatar || DEFAULT_AVATAR}
-                        alt={m.name}
-                        className="w-7 h-7 rounded-full object-cover ring-1 ring-slate-100 dark:ring-slate-800 shrink-0"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">{m.name}</p>
-                        <p className="text-[10px] text-slate-400 truncate">@{m.username}</p>
-                      </div>
-                      {String(m.id) === String(currentUser?.id) && (
-                        <span className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-1.5 py-0.2 rounded">
-                          Bạn
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* File, Ảnh & Link đã gửi */}
             <div className="p-4 border-b border-slate-100 dark:border-slate-800 space-y-3">
@@ -4423,6 +5134,7 @@ export default function MessagesView({
           groupAvatar={groupCallGroupAvatar}
           currentUser={currentUser}
           localStream={groupLocalStream}
+          rawCameraStream={groupRawCameraStreamRef.current}
           participants={groupCallParticipants}
           remoteStreams={groupCallRemoteStreams}
           callDuration={groupCallDuration}
@@ -4590,6 +5302,21 @@ export default function MessagesView({
               setDraftConversation(null);
               setMobileShowChat(true);
             }
+          }}
+          currentUser={currentUser}
+        />
+
+        {/* Modal Thêm thành viên vào nhóm chat hiện tại */}
+        <AddGroupMemberModal
+          isOpen={showAddMemberModal}
+          onClose={() => setShowAddMemberModal(false)}
+          conversation={currentConversation}
+          onMembersAdded={(updatedGroup) => {
+            if (updatedGroup) {
+              setConversations(prev => prev.map(c => c.id === updatedGroup.id ? { ...c, ...updatedGroup } : c));
+              setCurrentConversation(prev => prev && prev.id === updatedGroup.id ? { ...prev, ...updatedGroup } : prev);
+            }
+            loadServerConversations(false);
           }}
           currentUser={currentUser}
         />

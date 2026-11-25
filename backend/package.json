@@ -6,6 +6,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test",
+    "test:unit": "node -e \"import('node:fs').then(({readdirSync})=>import('node:child_process').then(({execFileSync})=>{const files=readdirSync('tests').filter(f=>f.endsWith('.test.js')&&!f.includes('.integration.')&&!f.startsWith('real-db')&&f!=='trust-penalty-integration.test.js').map(f=>'tests/'+f);execFileSync(process.execPath,['--test',...files],{stdio:'inherit'});}))\"",
     "migrate": "node src/scripts/migrate.js",
     "seed:admin": "node src/scripts/seedAdmin.js",
     "test:integration": "node --test tests/api-*.integration.test.js tests/trust-penalty-integration.test.js tests/real-db*.test.js"

@@ -1,4 +1,4 @@
-name: WINGS Social CI Pipeline
+name: WINGS Social CI/CD Pipeline
 
 on:
   push:
@@ -10,6 +10,7 @@ on:
       - 'feat/**'
       - 'fix/**'
       - 'test/**'
+      - 'Test/**'
   pull_request:
     branches:
       - main
@@ -19,67 +20,207 @@ on:
 
 jobs:
   # ========================================================
-  # JOB 1: KIỂM THỬ FRONTEND (Vite + React)
+  # STAGE 1: PRE-FLIGHT & ARCHITECTURE CHECK
   # ========================================================
-  frontend-check:
-    name: 🎨 Frontend Check 
+  preflight:
+    name: 🔍 1. Pre-flight & Architecture Check
     runs-on: ubuntu-latest
-
     steps:
-      - name: 📥 Tải mã nguồn từ GitHub
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: ⚙️ Cài đặt môi trường Node.js 20
+      - name: 🏛️ Verify 3-Layer Microservices & Gateway Structure
+        run: |
+          for svc in user-service post-service moderation-service notification-service; do
+            for layer in routes controllers repositories; do
+              if [ ! -d "services/$svc/src/$layer" ]; then
+                echo "::error::Missing $layer directory in services/$svc/src/"
+                exit 1
+              fi
+            done
+          done
+          test -f gateway/server.js
+          test -f services/ai-service/main.py
+          test -f backend/main.py
+          echo "✅ All microservice boundaries and 3-layer directories verified."
+
+  # ========================================================
+  # STAGE 2A: FRONTEND UNIT TESTS (React 19 + Vite)
+  # ========================================================
+  frontend-test:
+    name: 🎨 2A. Frontend Unit Tests
+    runs-on: ubuntu-latest
+    needs: [preflight]
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: frontend/package.json
 
-      - name: 📦 Cài đặt thư viện Frontend
+      - name: 📦 Install Frontend dependencies
         working-directory: frontend
         run: npm install
 
-      - name: 🧪 Chạy Unit Test Frontend
+      - name: 🧪 Run Frontend Unit Tests
         working-directory: frontend
         run: npm test
 
-      - name: 🏗️ Kiểm tra Build Production (Vite Build)
-        working-directory: frontend
-        run: npm run build
-
   # ========================================================
-  # JOB 2: KIỂM THỬ BACKEND (Node.js Express + AI Moderation)
+  # STAGE 2B: NODE.JS MICROSERVICES UNIT TESTS
   # ========================================================
-  backend-check:
-    name: ⚙️ Backend Check 
+  backend-unit:
+    name: ⚙️ 2B. Node.js Microservices Unit Tests
     runs-on: ubuntu-latest
-
+    needs: [preflight]
     steps:
-      - name: 📥 Tải mã nguồn từ GitHub
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: ⚙️ Cài đặt môi trường Node.js 20
+      - name: ⚙️ Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: backend/package.json
 
-      - name: 📦 Cài đặt thư viện Backend
+      - name: 📦 Install Backend dependencies
         working-directory: backend
         run: npm install
 
-      - name: 🔗 Expose backend dependencies to root-level services
+      - name: 🔗 Expose shared dependencies to root-level services
         run: ln -s "$GITHUB_WORKSPACE/backend/node_modules" "$GITHUB_WORKSPACE/node_modules"
 
-      - name: 🧪 Chạy Kiểm thử Toàn diện Backend (Unit & Integration Tests)
+      - name: 🧪 Run Node.js Unit Tests
         working-directory: backend
+        run: npm run test:unit
+
+  # ========================================================
+  # STAGE 2C: PYTHON FASTAPI & AI POLICY TESTS (Pytest)
+  # ========================================================
+  python-pytest:
+    name: 🐍 2C. FastAPI & AI Policy Tests
+    runs-on: ubuntu-latest
+    needs: [preflight]
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 📦 Install Python test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest "fastapi>=0.100.0" "uvicorn[standard]>=0.23.0" "pydantic>=2.0.0" "pydantic-settings>=2.0.0" "sqlalchemy>=2.0.0" "bcrypt>=4.0.0" "PyJWT>=2.8.0" "python-dotenv>=1.0.0" "python-multipart>=0.0.6"
+
+      - name: 🧪 Run Pytest Suite (Auth, Chat, Group, Call Signaling, Image & Livestream Moderation)
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+          JWT_SECRET_KEY: "ci-ephemeral-jwt-secret-key-for-automated-testing-only-32chars"
+          DATABASE_URL: "sqlite:///./ci_pytest.db"
+        run: python -m pytest -p no:cacheprovider tests
+
+  # ========================================================
+  # STAGE 3A: FRONTEND PRODUCTION BUILD (Vite)
+  # ========================================================
+  frontend-build:
+    name: 🏗️ 3A. Vite Production Build
+    runs-on: ubuntu-latest
+    needs: [frontend-test]
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package.json
+
+      - name: 📦 Install Frontend dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: 🏗️ Verify Vite Production Bundle
+        working-directory: frontend
+        run: npm run build
+
+  # ========================================================
+  # STAGE 3B: API GATEWAY & INTEGRATION FLOW TESTS
+  # ========================================================
+  gateway-and-integration:
+    name: 🔗 3B. Gateway & DB Integration Flow
+    runs-on: ubuntu-latest
+    needs: [backend-unit]
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: backend/package.json
+
+      - name: 📦 Install Backend dependencies
+        working-directory: backend
+        run: npm install
+
+      - name: 🔗 Expose shared dependencies to root-level services
+        run: ln -s "$GITHUB_WORKSPACE/backend/node_modules" "$GITHUB_WORKSPACE/node_modules"
+
+      - name: 🌐 Run API Gateway Routing Tests
+        working-directory: gateway
         run: npm test
 
-      - name: 🔗 Chạy Integration Tests Chuyên sâu (Database & API Flow)
+      - name: 🔗 Run Backend API & Database Integration Tests
         working-directory: backend
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           NODE_ENV: test
         run: npm run test:integration
+
+  # ========================================================
+  # STAGE 4: QUALITY GATE & VISUAL PIPELINE SUMMARY
+  # ========================================================
+  quality-gate:
+    name: 🛡️ 4. Quality Gate (Ready to Merge)
+    runs-on: ubuntu-latest
+    needs: [frontend-build, gateway-and-integration, python-pytest]
+    if: always()
+    steps:
+      - name: 📊 Generate CI/CD Quality Gate Summary
+        run: |
+          FE_STATUS="${{ needs.frontend-build.result }}"
+          BE_STATUS="${{ needs.gateway-and-integration.result }}"
+          PY_STATUS="${{ needs.python-pytest.result }}"
+
+          {
+            echo "## 🛡️ WINGS Social — CI Quality Gate Report"
+            echo ""
+            echo "| Stage | Component | Status |"
+            echo "| :--- | :--- | :---: |"
+            echo "| **Stage 1** | 🔍 Pre-flight & 3-Layer Microservices Structure | ✅ \`success\` |"
+            echo "| **Stage 2A & 3A** | 🎨 Frontend Unit Tests (258 tests) & Vite Build | \`$FE_STATUS\` |"
+            echo "| **Stage 2B & 3B** | ⚙️ Node.js Microservices, Gateway & DB Integration | \`$BE_STATUS\` |"
+            echo "| **Stage 2C** | 🐍 Python FastAPI & AI Moderation Policy (\`pytest\`) | \`$PY_STATUS\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FE_STATUS" != "success" ] || [ "$BE_STATUS" != "success" ] || [ "$PY_STATUS" != "success" ]; then
+            echo "::error::Quality Gate failed: one or more upstream test stages did not succeed."
+            exit 1
+          fi
+          echo "✅ All CI stages passed! Branch is ready to merge / deploy."

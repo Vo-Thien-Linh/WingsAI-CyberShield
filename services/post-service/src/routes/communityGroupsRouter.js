@@ -4,7 +4,7 @@ import { createUserRepository } from '../../../../backend/src/repositories/userR
 import { moderateTextContent } from '../../../../backend/src/utils/textModerator.js';
 import { moderateImageUrl } from '../../../../backend/src/services/imageModerationClient.js';
 import cloudinary from '../../../../backend/src/config/cloudinary.js';
-import { createCommunityGroupsRepository } from '../../../../backend/src/repositories/communityGroupsRepository.js';
+import { createCommunityGroupsRepository } from '../repositories/communityGroupsRepository.js';
 import { createCommunityGroupsService } from '../../../../backend/src/services/communityGroupsService.js';
 
 const asyncRoute = (handler) => (req, res, next) => {
@@ -274,6 +274,24 @@ export function createCommunityGroupsRouter({ pool, realtimeService = null }) {
       targetUserId: req.params.userId,
       user: req.user,
       role: req.body?.role,
+    });
+    res.json({ success: true, data });
+  }));
+
+  router.delete('/:groupId/members/:userId', requireAuth, asyncRoute(async (req, res) => {
+    const data = await service.removeMember({
+      groupId: req.params.groupId,
+      targetUserId: req.params.userId,
+      user: req.user,
+    });
+    res.json({ success: true, data });
+  }));
+
+  router.put('/:groupId/privacy', requireAuth, asyncRoute(async (req, res) => {
+    const data = await service.updateGroupPrivacy({
+      groupId: req.params.groupId,
+      user: req.user,
+      privacy: req.body?.privacy,
     });
     res.json({ success: true, data });
   }));

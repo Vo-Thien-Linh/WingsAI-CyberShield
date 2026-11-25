@@ -1,8 +1,8 @@
 import express from 'express';
 import { createAuthMiddleware } from '../../../../backend/src/middleware/auth.js';
 import { createUserRepository } from '../../../../backend/src/repositories/userRepository.js';
-import { createAppealRepository } from '../../../../backend/src/repositories/appealRepository.js';
-import { createAppealsController } from '../../../../backend/src/controllers/appealsController.js';
+import { createAppealRepository } from '../repositories/appealRepository.js';
+import { createAppealsController } from '../controllers/appealsController.js';
 
 export function createAppealsRouter({ pool, userRepository }) {
   const router = express.Router();

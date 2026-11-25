@@ -8,7 +8,6 @@ from app.config import settings
 from app.database import engine, Base, SessionLocal
 from app.services.auth_service import seed_default_users
 from app.routes.auth import router as auth_router
-from app.routes.admin import router as admin_router
 from app.routes.friend import router as friend_router
 from app.routes.settings import router as settings_router
 from app.routes.message import router as message_router
@@ -28,6 +27,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,9 +45,9 @@ def on_startup():
             seed_default_users(db)
         finally:
             db.close()
-        print("[NexusSocial] Khoi dong Backend FastAPI thanh cong! Swagger docs: http://localhost:8000/docs")
+        print("[WINGS] Khoi dong Backend FastAPI thanh cong! Swagger docs: http://localhost:8000/docs")
     except Exception as e:
-        print("[NexusSocial] Canh bao khoi tao database:", e)
+        print("[WINGS] Canh bao khoi tao database:", e)
 
 # 4. Custom handler cho lỗi validate dữ liệu đầu vào (chuẩn hóa thông báo tiếng Việt)
 @app.exception_handler(RequestValidationError)
@@ -70,8 +70,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # 5. Đăng ký các Routes
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api") # Hỗ trợ cả alias /api/auth
-app.include_router(admin_router, prefix="/api/v1")
-app.include_router(admin_router, prefix="/api")
 app.include_router(friend_router, prefix="/api/v1")
 app.include_router(friend_router, prefix="/api")
 app.include_router(settings_router, prefix="/api/v1")

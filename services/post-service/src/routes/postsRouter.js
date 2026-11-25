@@ -1,7 +1,7 @@
 import express from 'express';
 import { createAuthMiddleware } from '../../../../backend/src/middleware/auth.js';
-import { createPostsController } from '../../../../backend/src/controllers/postsController.js';
-import { createPostRepository } from '../../../../backend/src/repositories/postRepository.js';
+import { createPostsController } from '../controllers/postsController.js';
+import { createPostRepository } from '../repositories/postRepository.js';
 import { createUserRepository } from '../../../../backend/src/repositories/userRepository.js';
 import { createPostService } from '../../../../backend/src/services/postService.js';
 import { moderationHook } from '../../../../backend/src/services/moderationHook.js';

@@ -2,10 +2,11 @@
   "name": "api-gateway",
   "version": "1.0.0",
   "type": "module",
-  "description": "API Gateway for NexusSocial Microservices",
+  "description": "API Gateway for WINGS Microservices",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   }
 }
 

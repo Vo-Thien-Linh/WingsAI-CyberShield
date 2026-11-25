@@ -1,9 +1,9 @@
 import express from 'express';
 import { createAuthMiddleware } from '../../../../backend/src/middleware/auth.js';
 import { createUserRepository } from '../../../../backend/src/repositories/userRepository.js';
-import { createStoryRepository } from '../../../../backend/src/repositories/storyRepository.js';
+import { createStoryRepository } from '../repositories/storyRepository.js';
 import { createStoryService } from '../../../../backend/src/services/storyService.js';
-import { createStoriesController } from '../../../../backend/src/controllers/storiesController.js';
+import { createStoriesController } from '../controllers/storiesController.js';
 import { moderateImageUrl } from '../../../../backend/src/services/imageModerationClient.js';
 
 export function createStoriesRouter({ pool }) {
@@ -40,6 +40,9 @@ export function createStoriesRouter({ pool }) {
 
   // 7. Thả/cập nhật cảm xúc cho tin
   router.post('/:storyId/reactions', requireAuth, storiesController.reactToStory);
+
+  // 7.1 Tương tác với các tiện ích Story (Poll, Slider, Question)
+  router.post('/:storyId/interact', requireAuth, storiesController.interactWidget);
 
   // 8. Xóa tin
   router.delete('/:storyId', requireAuth, storiesController.deleteStory);

@@ -14,19 +14,29 @@
 | API path | Current receiving service | Responsibility |
 | --- | --- | --- |
 | `/api/auth/*`, `/api/v1/auth/*` | FastAPI platform application (port 8000) | Register, login, OTP, password recovery; sole JWT issuer |
-| `/api/users/*` | Express user service (port 5001) | Profiles, roles, sanctions, user administration |
-| `/api/posts/*`, `/api/upload/*` | Express post service (port 5002) | Posts, comments, reactions, shares, uploads, image appeals |
-| `/api/reports/*`, `/api/appeals/*`, `/api/admin/*` | Express moderation service (port 5003) | Reports, appeals, decisions, moderation dashboard |
+| `/api/users/*` | Express user service (port 5001) | Profiles, roles, sanctions, trust history, user administration |
+| `/api/posts/*`, `/api/stories/*`, `/api/groups/*`, `/api/hashtags/*`, `/api/upload/*` | Express post service (port 5002) | Posts, comments, reactions, shares, stories, community groups, hashtags, uploads, image appeals |
+| `/api/reports/*`, `/api/appeals/*`, `/api/admin/*` | Express moderation service (port 5003) | Reports, appeals, decisions, AI override logs, moderation dashboard |
 | `/api/notifications/*`, `/api/realtime/stream` | Express notification service (port 5004) | User notifications and SSE broadcast stream |
-| `/api/friends/*`, `/api/messages/*`, `/api/settings/*`, `/api/search/*` | FastAPI platform application (port 8000) | Friendships, chat, settings, search |
-| `/api/v1/moderate/*`, `/api/moderate/*` | Standalone AI inference service (port 8001) | Text and image analysis |
+| `/api/friends/*`, `/api/messages/*`, `/api/livestreams/*`, `/api/settings/*`, `/api/search/*` | FastAPI platform application (port 8000) | Friendships, chat, livestreams, settings, search |
+| `/api/v1/moderate/*`, `/api/moderate/*` | Standalone AI inference service (port 8001) | Text (PhoBERT) and image (EfficientNet-B1) analysis |
 
-`/api/*` is the canonical public route family. `/api/v1/*` remains as a compatibility alias where the FastAPI app currently exposes it.
+`/api/*` is the canonical public route family. `/api/v1/*` remains as a compatibility alias and routes to the same owning service through the gateway.
+
+## Service directory layout (3-layer Node architecture)
+
+Each Node.js microservice under `services/` follows a consistent 3-layer layout (`routes` -> `controllers` -> `repositories`):
+
+- `services/user-service/src/` — `routes/usersRouter.js`, `controllers/usersController.js`, `repositories/userRepository.js`
+- `services/post-service/src/` — `routes/` (`postsRouter`, `postReactionsRouter`, `storiesRouter`, `communityGroupsRouter`, `hashtagsRouter`, `uploadRouter`, `imagePreviewRouter`, `moderationAppealRouter`), `controllers/` (`postsController`, `postReactionsController`, `storiesController`, `uploadController`), `repositories/` (`postRepository`, `reactionRepository`, `storyRepository`, `communityGroupsRepository`, `hashtagRepository`)
+- `services/moderation-service/src/` — `routes/` (`adminRouter`, `appealsRouter`, `reportsRouter`, `imageModerationRouter`), `controllers/` (`adminController`, `appealsController`, `reportsController`), `repositories/` (`adminRepository`, `appealRepository`, `reportRepository`)
+- `services/notification-service/src/` — `routes/` (`notificationsRouter`, `realtimeRouter`), `controllers/notificationsController.js`, `repositories/notificationRepository.js`
+- `services/ai-service/` — standalone FastAPI app (`main.py`) exposing PhoBERT and EfficientNet inference on port `8001`
 
 ## Gateway configuration
 
 The gateway route registry is in `gateway/server.js`. Upstream URLs can be configured with `PLATFORM_SERVICE_URL`, `AI_SERVICE_URL`, `USER_SERVICE_URL`, `POST_SERVICE_URL`, `MODERATION_SERVICE_URL`, and `REALTIME_SERVICE_URL`. Local defaults use loopback; Docker Compose sets service DNS names. Browser API calls use the gateway as their base URL. Only the gateway and frontend publish host ports in the microservices Compose file.
 
-Current limitation: the AI service has its own FastAPI app, but its router and inference modules still live under `backend/app`. Node route modules have moved under their owning service folders, and user/notification controllers and the notification repository have moved too. The remaining controllers and repositories still live in `backend/src` and are imported by the service-local routes; continue extracting those layers incrementally. PostgreSQL `NOTIFY` carries feed events between Social Content, Moderation, and Realtime processes during the shared-database phase. The User/Auth APIs are not yet consolidated into one runtime service.
+Current limitation: the AI service has its own FastAPI app, but its router and inference modules still live under `backend/app`. All four Node services (`user-service`, `post-service`, `moderation-service`, `notification-service`) now own their `routes`, `controllers`, and `repositories` under `services/<service>/src/`, while `backend/src/` retains lightweight compatibility re-exports for shared utilities and legacy imports. PostgreSQL `NOTIFY` carries feed events between Social Content, Moderation, and Realtime processes during the shared-database phase. The User/Auth APIs are not yet consolidated into one runtime service.
 
 Table write owners and the migration path are recorded in `database/service-ownership.md`.

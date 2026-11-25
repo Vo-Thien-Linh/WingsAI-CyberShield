@@ -1,6 +1,6 @@
 import express from 'express';
 import cloudinary, { upload, uploadStoryMedia } from '../../../../backend/src/config/cloudinary.js';
-import { uploadController } from '../../../../backend/src/controllers/uploadController.js';
+import { uploadController } from '../controllers/uploadController.js';
 import { createAuthMiddleware } from '../../../../backend/src/middleware/auth.js';
 import { createUserRepository } from '../../../../backend/src/repositories/userRepository.js';
 import { consumeCloudinaryCleanupTicket, verifyCloudinaryCleanupTicket } from '../../../../backend/src/utils/cloudinaryCleanupTicket.js';

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Navbar from './components/Navbar';
+import BottomNav from './components/BottomNav';
 import HomeView from './components/HomeView';
 import CommunityGroupsView from './components/CommunityGroupsView';
 import HashtagView from './components/HashtagView';
@@ -22,6 +23,7 @@ import AppealModal from './components/AppealModal';
 import AuthModal from './components/AuthModal';
 import LiveStreamModal from './components/LiveStreamModal';
 import CreateLiveStreamModal from './components/CreateLiveStreamModal';
+import OfflineFallbackView from './components/OfflineFallbackView';
 import { livestreamService } from './services/livestreamService';
 import { authService } from './services/authService';
 import { messageService } from './services/messageService';
@@ -146,6 +148,22 @@ export default function App() {
     };
   }, [currentUser?.id]);
 
+  // Giám sát trạng thái kết nối mạng (Online / Offline Fallback)
+  const [isOnline, setIsOnline] = useState(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   // Quản lý Chế độ Giao diện Sáng / Tối (Theme Mode)
   const [theme, setTheme] = useState(() => {
     return localStorage.getItem('nexussocial_theme') || 'light';
@@ -177,6 +195,7 @@ export default function App() {
   // Quản lý trạng thái chức năng Livestream THẬT từ CSDL PostgreSQL/SQLite
   const [isCreateLiveOpen, setIsCreateLiveOpen] = useState(false);
   const [activeLiveSession, setActiveLiveSession] = useState(null);
+  const [isInMobileChat, setIsInMobileChat] = useState(false);
   const [liveStreamMode, setLiveStreamMode] = useState('view');
   const [activeStreamsList, setActiveStreamsList] = useState([]);
 
@@ -292,8 +311,9 @@ export default function App() {
 
     // Xác thực token tươi mới với Backend FastAPI
     authService.verifySession(token).then((verifiedUser) => {
-      // Bỏ qua phản hồi phiên cũ nếu người dùng đã đăng xuất hoặc đăng nhập tài khoản khác.
-      if (authService.getToken() !== token) return;
+      const currentToken = authService.getToken();
+      // Chỉ bỏ qua nếu người dùng vừa đăng nhập một token MỚI khác trong lúc chờ
+      if (currentToken && currentToken !== token) return;
       if (verifiedUser) {
         setCurrentUser(verifiedUser);
       } else {
@@ -303,6 +323,16 @@ export default function App() {
         setIsAuthModalOpen(true);
       }
     });
+
+    const handleSessionExpired = () => {
+      authService.logout();
+      setCurrentUser(null);
+      setAuthNoticeMessage('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại để tiếp tục.');
+      setAuthModalTab('login');
+      setIsAuthModalOpen(true);
+    };
+    window.addEventListener('wings:session-expired', handleSessionExpired);
+    return () => window.removeEventListener('wings:session-expired', handleSessionExpired);
   }, []);
 
   // Tự động gỡ phạt cooldown khi thời gian đếm ngược kết thúc
@@ -372,6 +402,8 @@ export default function App() {
     } else if (rawHash === 'post') {
       initialHash = 'post';
       initialPostId = sessionStorage.getItem('wings_viewed_post_id');
+    } else if (rawHash === 'offline' || rawHash === '404' || rawHash === 'error') {
+      initialHash = rawHash;
     }
 
     if (initialHash === 'post') {
@@ -391,9 +423,11 @@ export default function App() {
       if (initialHash === 'admin' || initialHash === 'moderation' || initialHash === 'profile' || initialHash === 'messages' || initialHash === 'settings' || initialHash === 'hashtag') {
         initialHash = 'home';
       }
-      setAuthNoticeMessage('Chào mừng bạn đến với WINGS! Vui lòng đăng nhập để tiếp tục.');
-      setAuthModalTab('login');
-      setIsAuthModalOpen(true);
+      if (initialHash !== 'offline' && initialHash !== '404' && initialHash !== 'error') {
+        setAuthNoticeMessage('Chào mừng bạn đến với WINGS! Vui lòng đăng nhập để tiếp tục.');
+        setAuthModalTab('login');
+        setIsAuthModalOpen(true);
+      }
     } else if (currentUser) {
       if (initialHash === 'admin' && !hasRole(currentUser, ROLES.ADMIN)) {
         initialHash = getDefaultTabForUser(currentUser);
@@ -414,7 +448,9 @@ export default function App() {
       let targetTab = state?.tab || hash || 'home';
       let targetPostId = state?.postId || null;
 
-      if (targetTab.startsWith('post-')) {
+      if (hash === 'offline' || hash === '404' || hash === 'error') {
+        targetTab = hash;
+      } else if (targetTab.startsWith('post-')) {
         targetPostId = targetTab.replace('post-', '');
         targetTab = 'post';
       } else if (targetTab.startsWith('hashtag/')) {
@@ -526,6 +562,17 @@ export default function App() {
 
   // Xử lý Chuyển Tab có Auth Guard và Role Guard
   const handleTabChange = (tab, targetUser = null, replace = false, subTab = 'all') => {
+    if (tab === 'offline' || tab === '404' || tab === 'error') {
+      setActiveTab(tab);
+      const stateObj = { tab };
+      if (replace) {
+        window.history.replaceState(stateObj, '', `#${tab}`);
+      } else {
+        window.history.pushState(stateObj, '', `#${tab}`);
+      }
+      return;
+    }
+
     if (!currentUser && (tab === 'messages' || tab === 'profile' || tab === 'admin' || tab === 'moderation' || tab === 'settings')) {
       const msg = tab === 'admin' || tab === 'moderation'
         ? "Vui lòng đăng nhập để truy cập khu vực này"
@@ -807,7 +854,7 @@ export default function App() {
     }
   };
 
-  // Mở trình xem Story mục tiêu từ thông báo hoặc danh sách tin (chuyên nghiệp như Facebook)
+  // Mở trình xem Story mục tiêu từ thông báo, tin nhắn hoặc danh sách tin (chuyên nghiệp như Instagram/Facebook)
   const handleOpenStoryViewer = async ({ storyId, tray, userId, initialShowViewers = false, targetViewerId = null }) => {
     try {
       let targetTray = tray;
@@ -818,6 +865,18 @@ export default function App() {
           const singleStoryRes = await fetchStoryByIdApi(storyId, currentUser?.id);
           const singleStory = singleStoryRes?.data || singleStoryRes;
           if (singleStory?.id) {
+            const isOwner = Boolean(currentUser?.id && String(singleStory.author_id) === String(currentUser.id));
+            const isExpired = Boolean(
+              singleStory.isExpired ||
+              (singleStory.expires_at && new Date(singleStory.expires_at) <= new Date()) ||
+              (singleStory.expiresAt && new Date(singleStory.expiresAt) <= new Date())
+            );
+
+            // Nếu tin đã hết hạn (>24h) và người xem KHÔNG phải chủ tin -> Chặn xem
+            if ((isExpired && !isOwner) || singleStory.canView === false) {
+              return { expired: true, canView: false };
+            }
+
             const parsedBg = typeof singleStory.backgroundStyle === 'object' && singleStory.backgroundStyle !== null
               ? singleStory.backgroundStyle
               : (typeof singleStory.background_style === 'string'
@@ -831,27 +890,47 @@ export default function App() {
               mediaUrl: singleStory.mediaUrl || singleStory.media_url || null,
               textContent: singleStory.textContent || singleStory.text_content || '',
               backgroundStyle: parsedBg,
+              isExpired,
             };
 
-            targetTray = {
-              author: {
-                id: singleStory.author_id,
-                name: singleStory.author_name || singleStory.full_name || singleStory.username || 'Người dùng',
-                username: singleStory.author_username || singleStory.username || '',
-                avatar: singleStory.author_avatar || singleStory.avatar_url,
-              },
-              isSelf: currentUser?.id ? String(currentUser.id) === String(singleStory.author_id) : false,
-              hasUnviewedStories: false,
-              stories: [normalizedSingleStory],
-            };
+            // Nếu tin chưa hết hạn, thử nạp toàn bộ khay tin đang hoạt động của tác giả đó để vuốt qua lại mượt mà
+            if (!isExpired && singleStory.author_id) {
+              try {
+                const authorTrayRes = await fetchUserStoriesApi(singleStory.author_id);
+                if (
+                  authorTrayRes?.data?.stories?.length > 0 &&
+                  authorTrayRes.data.stories.some((s) => String(s.id) === String(singleStory.id))
+                ) {
+                  targetTray = authorTrayRes.data;
+                }
+              } catch {
+                // ignore and use single story tray
+              }
+            }
+
+            if (!targetTray) {
+              targetTray = {
+                author: {
+                  id: singleStory.author_id,
+                  name: singleStory.author_name || singleStory.full_name || singleStory.username || 'Người dùng',
+                  username: singleStory.author_username || singleStory.username || '',
+                  avatar: singleStory.author_avatar || singleStory.avatar_url,
+                },
+                isSelf: isOwner,
+                hasUnviewedStories: false,
+                stories: [normalizedSingleStory],
+              };
+            }
           }
         } catch (fetchErr) {
-          console.warn('Không thể tải tin theo ID, thử tìm qua feed/user:', fetchErr.message);
+          console.warn('Không thể tải tin theo ID:', fetchErr.message);
+          // Nếu chỉ định rõ storyId mà tin đã bị xóa (404), không mở nhầm sang tin của người khác
+          return { deleted: true, canView: false };
         }
       }
 
-      // 2. Nếu chưa có tray và có userId, thử gọi API lấy tin của user đó
-      if (!targetTray && userId) {
+      // 2. Nếu chưa có tray (và không truyền storyId cố định) nhưng có userId, thử gọi API lấy tin đang hoạt động của user đó
+      if (!targetTray && !storyId && userId) {
         try {
           const userStoriesRes = await fetchUserStoriesApi(userId);
           if (userStoriesRes?.data?.stories?.length > 0) {
@@ -862,14 +941,11 @@ export default function App() {
         }
       }
 
-      // 3. Fallback: tìm trong feed stories chung
-      if (!targetTray) {
+      // 3. Fallback: tìm trong feed stories chung (khi không có storyId bị hết hạn/xóa)
+      if (!targetTray && !storyId) {
         const res = await fetchStories();
         const allTrays = res?.data || [];
-        if (storyId) {
-          targetTray = allTrays.find((t) => t.stories?.some((s) => String(s.id) === String(storyId)));
-        }
-        if (!targetTray && userId) {
+        if (userId) {
           targetTray = allTrays.find((t) => String(t.author?.id) === String(userId));
         }
         if (!targetTray && currentUser?.id && !userId) {
@@ -880,18 +956,6 @@ export default function App() {
         }
       }
 
-      // 4. Nếu vẫn chưa có và người dùng đang click vào thông báo tin của chính mình
-      if (!targetTray && currentUser?.id) {
-        try {
-          const myStoriesRes = await fetchUserStoriesApi(currentUser.id);
-          if (myStoriesRes?.data?.stories?.length > 0) {
-            targetTray = myStoriesRes.data;
-          }
-        } catch (myErr) {
-          console.warn('Không thể tải tin cá nhân:', myErr.message);
-        }
-      }
-
       if (targetTray) {
         setActiveStoryViewerTarget({
           tray: targetTray,
@@ -899,11 +963,28 @@ export default function App() {
           initialShowViewers: Boolean(initialShowViewers),
           targetViewerId: targetViewerId ? String(targetViewerId) : undefined,
         });
+        return { success: true };
       }
     } catch (err) {
       console.warn('Lỗi mở Story Viewer:', err.message);
     }
+    return { success: false };
   };
+
+  // Tự động mở Story nếu truy cập qua liên kết ?storyId=... hoặc ?story=...
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    const urlParams = new URLSearchParams(window.location.search);
+    const storyIdParam = urlParams.get('storyId') || urlParams.get('story');
+    if (storyIdParam && /^\d+$/.test(storyIdParam)) {
+      urlParams.delete('storyId');
+      urlParams.delete('story');
+      const newSearch = urlParams.toString();
+      const cleanUrl = `${window.location.pathname}${newSearch ? `?${newSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState(window.history.state, '', cleanUrl);
+      handleOpenStoryViewer({ storyId: storyIdParam });
+    }
+  }, [currentUser?.id]);
 
   // Lắng nghe Realtime SSE cho Bài viết & Chia sẻ (Realtime Feed)
   useEffect(() => {
@@ -1947,8 +2028,26 @@ export default function App() {
     setActiveTab('messages');
   };
 
+  // Màn hình Fallback Tùy biến (Chalkboard Style): Hiển thị khi mất mạng, máy chủ mất kết nối hoặc tab #offline / #404
+  if (!isOnline || activeTab === 'offline' || activeTab === '404' || activeTab === 'error') {
+    return (
+      <OfflineFallbackView 
+        type={activeTab === '404' ? '404' : (activeTab === 'error' ? 'server_error' : 'offline')}
+        onRetry={() => {
+          if (activeTab === 'offline' || activeTab === '404' || activeTab === 'error') {
+            handleTabChange('home');
+          } else {
+            window.location.reload();
+          }
+        }}
+        onGoHome={() => handleTabChange('home')}
+        onGoMessages={() => handleTabChange('messages')}
+      />
+    );
+  }
+
   return (
-    <div className={`bg-slate-100/80 dark:bg-slate-950 text-slate-900 dark:text-slate-100 selection:bg-blue-500 selection:text-white flex flex-col font-sans transition-colors duration-200 ${activeTab === 'messages' ? 'h-screen overflow-hidden' : 'min-h-screen'}`}>
+    <div className={`w-full max-w-full overflow-x-hidden bg-slate-100/80 dark:bg-slate-950 text-slate-900 dark:text-slate-100 selection:bg-blue-500 selection:text-white flex flex-col font-sans transition-colors duration-200 ${activeTab === 'messages' ? 'h-[100dvh] max-h-[100dvh] overflow-hidden' : 'min-h-screen'}`}>
 
 
       {/* Thanh điều hướng chính */}
@@ -1982,7 +2081,7 @@ export default function App() {
       />
 
       {/* Vùng hiển thị nội dung theo Tab */}
-      <div className={`flex-1 min-h-0 ${activeTab === 'admin' ? 'pb-6' : activeTab === 'messages' ? 'pb-0 flex flex-col h-full overflow-hidden' : 'pb-16'}`}>
+      <div className={`flex-1 min-h-0 w-full max-w-full overflow-x-hidden ${activeTab === 'admin' ? 'pb-6' : activeTab === 'messages' ? 'pb-0 flex flex-col flex-1 min-h-0 overflow-hidden' : 'pb-20 md:pb-12'}`}>
         
         {/* Tab 1: Trang chủ / News Feed */}
         {activeTab === 'home' && (
@@ -2107,7 +2206,7 @@ export default function App() {
         )}
 
         {/* Tab 3: Tin nhắn (Hỗ trợ báo cáo tin nhắn, giữ DOM để chuyển tab tức thì 0s) */}
-        <div className={activeTab === 'messages' ? 'h-full flex flex-col flex-1' : 'hidden'}>
+        <div className={activeTab === 'messages' ? 'flex-1 min-h-0 h-full flex flex-col overflow-hidden' : 'hidden'}>
           {hasVisitedMessages && currentUser && (
             <MessagesView 
               currentUser={currentUser} 
@@ -2118,6 +2217,7 @@ export default function App() {
               onOpenProfile={handleOpenUserProfile}
               onOpenStoryViewer={handleOpenStoryViewer}
               onUnreadCountChange={setUnreadMessagesCount}
+              onMobileChatStateChange={setIsInMobileChat}
             />
           )}
         </div>
@@ -2385,6 +2485,17 @@ export default function App() {
           onViewPost={handleViewPost}
           onOpenStoryViewer={handleOpenStoryViewer}
           onClose={() => setActiveStoryViewerTarget(null)}
+        />
+      )}
+
+      {/* Thanh điều hướng dưới đáy màn hình trên Mobile (ẩn khi đang chat bên trong cuộc trò chuyện cụ thể) */}
+      {!(activeTab === 'messages' && isInMobileChat) && (
+        <BottomNav
+          activeTab={activeTab}
+          setActiveTab={handleTabChange}
+          unreadCount={unreadCount}
+          unreadMessagesCount={unreadMessagesCount}
+          onRefreshHome={handleRefreshHome}
         />
       )}
 
