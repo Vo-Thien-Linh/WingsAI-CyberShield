@@ -1,8 +1,8 @@
 import express from 'express';
 import { createAuthMiddleware } from '../../../../backend/src/middleware/auth.js';
 import { createUserRepository } from '../../../../backend/src/repositories/userRepository.js';
-import { createReportRepository } from '../../../../backend/src/repositories/reportRepository.js';
-import { createReportsController } from '../../../../backend/src/controllers/reportsController.js';
+import { createReportRepository } from '../repositories/reportRepository.js';
+import { createReportsController } from '../controllers/reportsController.js';
 import { createPostRepository } from '../../../../backend/src/repositories/postRepository.js';
 
 export function createReportsRouter({ pool, userRepository, postRepository }) {

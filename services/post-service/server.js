@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, '../../backend/.env') });
 
 import pool from '../../backend/src/config/db.js';
-import { createPostRepository } from '../../backend/src/repositories/postRepository.js';
+import { createPostRepository } from './src/repositories/postRepository.js';
 import { createPostReactionsRouter } from './src/routes/postReactionsRouter.js';
 import { createPostsRouter } from './src/routes/postsRouter.js';
 import { createModerationAppealRouter } from './src/routes/moderationAppealRouter.js';
@@ -17,7 +17,7 @@ import { createImagePreviewRouter } from './src/routes/imagePreviewRouter.js';
 import { createUploadRouter } from './src/routes/uploadRouter.js';
 import { createStoriesRouter } from './src/routes/storiesRouter.js';
 import { createCommunityGroupsRouter } from './src/routes/communityGroupsRouter.js';
-import { createHashtagsRouter } from '../../backend/src/routes/hashtagsRouter.js';
+import { createHashtagsRouter } from './src/routes/hashtagsRouter.js';
 import { realtimeService } from '../../backend/src/services/realtimeService.js';
 import { attachRealtimePublisher } from '../../backend/src/services/postgresRealtimeBridge.js';
 

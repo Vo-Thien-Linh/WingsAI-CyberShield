@@ -1,7 +1,7 @@
 @echo off
-title Khoi dong NexusSocial Microservices
+title Khoi dong WINGS Microservices
 echo ===================================================================
-echo   KHOI DONG HE THONG MICROSERVICES NEXUSSOCIAL (SHARED DATABASE)
+echo   KHOI DONG HE THONG MICROSERVICES WINGS (SHARED DATABASE)
 echo ===================================================================
 
 :: Thiet lap duong dan node_modules dung chung cho tat ca services
@@ -52,7 +52,7 @@ start "Frontend React (:5173)" /D "%~dp0frontend" "%ComSpec%" /k npm run dev
 
 echo.
 echo ===================================================================
-echo   HE THONG MICROSERVICES NEXUSSOCIAL DA KHOI DONG HOAN TAT!
+echo   HE THONG MICROSERVICES WINGS DA KHOI DONG HOAN TAT!
 echo ===================================================================
 echo   - Frontend:       http://localhost:5173
 echo   - API Gateway:    http://localhost:5000

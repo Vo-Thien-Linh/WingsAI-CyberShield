@@ -8,6 +8,28 @@ const STORAGE_KEYS = {
   SAVED_ACCOUNTS: 'nexussocial_saved_accounts'
 };
 
+function isJwtTokenExpired(token) {
+  if (!token || typeof token !== 'string') return true;
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(
+      atob(base64)
+        .split('')
+        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    const payload = JSON.parse(jsonPayload);
+    if (typeof payload?.exp === 'number') {
+      return payload.exp * 1000 <= Date.now();
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export const authService = {
   // Kiểm tra trạng thái máy chủ FastAPI đã sẵn sàng chưa
   checkHealth: async () => {
@@ -65,9 +87,16 @@ export const authService = {
     }
   },
 
-  // Lấy người dùng đang đăng nhập hiện tại
+  // Lấy người dùng đang đăng nhập hiện tại (tự động xóa phiên nếu JWT đã hết hạn)
   getCurrentUser: () => {
     try {
+      const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+      if (!token || isJwtTokenExpired(token)) {
+        localStorage.removeItem(STORAGE_KEYS.TOKEN);
+        localStorage.removeItem(STORAGE_KEYS.USER);
+        localStorage.removeItem('nexussocial_user');
+        return null;
+      }
       const userStr = localStorage.getItem(STORAGE_KEYS.USER);
       if (userStr) {
         return JSON.parse(userStr);
@@ -135,9 +164,16 @@ export const authService = {
     }
   },
 
-  // Lấy Token hiện tại
+  // Lấy Token hiện tại (trả về null và dọn sạch nếu token đã hết hạn)
   getToken: () => {
-    return localStorage.getItem(STORAGE_KEYS.TOKEN);
+    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
+    if (token && isJwtTokenExpired(token)) {
+      localStorage.removeItem(STORAGE_KEYS.TOKEN);
+      localStorage.removeItem(STORAGE_KEYS.USER);
+      localStorage.removeItem('nexussocial_user');
+      return null;
+    }
+    return token;
   },
 
   // ĐĂNG NHẬP (Hỗ trợ cả Email HOẶC Số điện thoại)

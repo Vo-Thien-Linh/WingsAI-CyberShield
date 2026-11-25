@@ -833,9 +833,12 @@ export default function MessagesView({
 
     let ws = null;
     let pingInterval = null;
+    let connectTimer = null;
+    let retryTimer = null;
     let isMounted = true;
 
     const connectWs = () => {
+      if (!isMounted || !authService.getToken()) return;
       try {
         const wsUrl = getWsBaseUrl();
         ws = createAuthenticatedRealtimeSocket(wsUrl, currentUser.id);
@@ -1282,30 +1285,37 @@ export default function MessagesView({
         wsMessageDispatcherRef.current = handleWsMessage;
         ws.onmessage = handleWsMessage;
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           setIsWsConnected(false);
           clearInterval(pingInterval);
           wsRef.current = null;
+          if (event?.code === 4401 || !authService.getToken()) {
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('wings:session-expired'));
+            }
+            return;
+          }
           if (isMounted) {
-            setTimeout(connectWs, 3000);
+            retryTimer = setTimeout(connectWs, 3000);
           }
         };
 
         ws.onerror = () => {
           setIsWsConnected(false);
-          ws?.close();
         };
       } catch (err) {
         console.warn('Lỗi khởi tạo WebSocket tin nhắn:', err);
       }
     };
 
-    connectWs();
+    connectTimer = setTimeout(connectWs, 50);
 
     return () => {
       isMounted = false;
+      clearTimeout(connectTimer);
+      clearTimeout(retryTimer);
       clearInterval(pingInterval);
-      if (ws) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
     };

@@ -75,12 +75,12 @@ test('trending respects the limit', async () => {
 });
 
 test('trending requires authentication', () => {
-  const route = readFileSync(fileURLToPath(new URL('../src/routes/hashtagsRouter.js', import.meta.url)), 'utf8');
+  const route = readFileSync(fileURLToPath(new URL('../../services/post-service/src/routes/hashtagsRouter.js', import.meta.url)), 'utf8');
   assert.match(route, /router\.get\('\/trending', requireAuth/);
 });
 
 test('trending uses the same visibility predicate as the feed', () => {
-  const root = fileURLToPath(new URL('../src/', import.meta.url));
+  const root = fileURLToPath(new URL('../../services/post-service/src/', import.meta.url));
   const feed = readFileSync(`${root}repositories/postRepository.js`, 'utf8');
   const trending = readFileSync(`${root}repositories/hashtagRepository.js`, 'utf8');
   assert.match(feed, /buildPostVisibilityPredicate/);
@@ -90,7 +90,7 @@ test('trending uses the same visibility predicate as the feed', () => {
 });
 
 test('hashtag browse normalizes tags and rejects invalid input', () => {
-  const route = readFileSync(fileURLToPath(new URL('../src/routes/hashtagsRouter.js', import.meta.url)), 'utf8');
+  const route = readFileSync(fileURLToPath(new URL('../../services/post-service/src/routes/hashtagsRouter.js', import.meta.url)), 'utf8');
   assert.match(route, /normalizeHashtag\(decodeURIComponent/);
   assert.match(route, /res\.status\(400\)/);
 });

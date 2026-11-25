@@ -7,7 +7,7 @@ env_path = Path(__file__).resolve().parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 class Settings:
-    PROJECT_NAME: str = "NexusSocial - Phòng Chống Bạo Lực Mạng API"
+    PROJECT_NAME: str = "WINGS - Phòng Chống Bạo Lực Mạng API"
     VERSION: str = "1.0.0"
     API_V1_PREFIX: str = "/api/v1"
     

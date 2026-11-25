@@ -1,8 +1,8 @@
 import express from 'express';
 import { createAuthMiddleware } from '../../../../backend/src/middleware/auth.js';
 import { createUserRepository } from '../../../../backend/src/repositories/userRepository.js';
-import { createAdminRepository } from '../../../../backend/src/repositories/adminRepository.js';
-import { createAdminController } from '../../../../backend/src/controllers/adminController.js';
+import { createAdminRepository } from '../repositories/adminRepository.js';
+import { createAdminController } from '../controllers/adminController.js';
 
 export function createAdminRouter({ pool, userRepository }) {
   const router = express.Router();

@@ -4,7 +4,7 @@ import { createUserRepository } from '../../../../backend/src/repositories/userR
 import { moderateTextContent } from '../../../../backend/src/utils/textModerator.js';
 import { moderateImageUrl } from '../../../../backend/src/services/imageModerationClient.js';
 import cloudinary from '../../../../backend/src/config/cloudinary.js';
-import { createCommunityGroupsRepository } from '../../../../backend/src/repositories/communityGroupsRepository.js';
+import { createCommunityGroupsRepository } from '../repositories/communityGroupsRepository.js';
 import { createCommunityGroupsService } from '../../../../backend/src/services/communityGroupsService.js';
 
 const asyncRoute = (handler) => (req, res, next) => {

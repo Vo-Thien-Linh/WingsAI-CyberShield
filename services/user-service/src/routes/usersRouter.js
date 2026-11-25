@@ -1,6 +1,6 @@
 import express from 'express';
 import { createAuthMiddleware } from '../../../../backend/src/middleware/auth.js';
-import { createUserRepository } from '../../../../backend/src/repositories/userRepository.js';
+import { createUserRepository } from '../repositories/userRepository.js';
 import { createUsersController, formatUserProfile, formatFriend } from '../controllers/usersController.js';
 
 export { formatUserProfile, formatFriend };

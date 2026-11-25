@@ -1,9 +1,9 @@
-name: WINGS Social CD Pipeline
+name: WINGS Social CI/CD Pipeline - Deployment
 
 on:
   # Tự động chạy khi CI thành công trên main / master / develop (chỉ với sự kiện push)
   workflow_run:
-    workflows: ["WINGS Social CI Pipeline"]
+    workflows: ["WINGS Social CI/CD Pipeline"]
     types: [completed]
     branches:
       - main
