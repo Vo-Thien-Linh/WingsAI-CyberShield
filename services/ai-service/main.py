@@ -11,7 +11,7 @@ from fastapi import FastAPI
 import uvicorn
 from app.routes.moderate import router as moderation_router
 
-app = FastAPI(title="NexusSocial AI Inference Service", version="1.0.0")
+app = FastAPI(title="WINGS AI Inference Service", version="1.0.0")
 app.include_router(moderation_router, prefix="/api/v1")
 app.include_router(moderation_router, prefix="/api")
 

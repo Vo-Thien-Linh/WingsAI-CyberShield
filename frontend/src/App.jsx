@@ -311,8 +311,9 @@ export default function App() {
 
     // Xác thực token tươi mới với Backend FastAPI
     authService.verifySession(token).then((verifiedUser) => {
-      // Bỏ qua phản hồi phiên cũ nếu người dùng đã đăng xuất hoặc đăng nhập tài khoản khác.
-      if (authService.getToken() !== token) return;
+      const currentToken = authService.getToken();
+      // Chỉ bỏ qua nếu người dùng vừa đăng nhập một token MỚI khác trong lúc chờ
+      if (currentToken && currentToken !== token) return;
       if (verifiedUser) {
         setCurrentUser(verifiedUser);
       } else {
@@ -322,6 +323,16 @@ export default function App() {
         setIsAuthModalOpen(true);
       }
     });
+
+    const handleSessionExpired = () => {
+      authService.logout();
+      setCurrentUser(null);
+      setAuthNoticeMessage('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại để tiếp tục.');
+      setAuthModalTab('login');
+      setIsAuthModalOpen(true);
+    };
+    window.addEventListener('wings:session-expired', handleSessionExpired);
+    return () => window.removeEventListener('wings:session-expired', handleSessionExpired);
   }, []);
 
   // Tự động gỡ phạt cooldown khi thời gian đếm ngược kết thúc

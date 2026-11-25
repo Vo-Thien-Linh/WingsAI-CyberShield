@@ -1,7 +1,7 @@
 {
-  "name": "btl-project-microservices",
+  "name": "wings-social-microservices",
   "version": "2.0.0",
-  "description": "Nen Tang Phong Chong Bao Luc Mang - Kien truc Microservices",
+  "description": "WINGS - Nen Tang Mang Xa Hoi Phong Chong Bao Luc Mang (Microservices)",
   "type": "module",
   "scripts": {
     "start:gateway": "node gateway/server.js",

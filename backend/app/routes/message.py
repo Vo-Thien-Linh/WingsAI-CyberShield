@@ -217,6 +217,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     payload = decode_access_token(token) if token else None
     token_user_id = str(payload.get("sub", "")) if payload else ""
     if not token_user_id or token_user_id.strip().lower() != str(user_id).strip().lower():
+        await websocket.accept(subprotocol="nexussocial")
         await websocket.close(code=4401, reason="Unauthorized")
         return
 
