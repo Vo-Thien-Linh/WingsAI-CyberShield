@@ -28,23 +28,23 @@ start "AI Inference Service (Python :8001)" /D "%~dp0" "%ComSpec%" /k call servi
 call :WAIT_FOR_URL "AI Inference Service PhoBERT va EfficientNet" "http://127.0.0.1:8001/health" 180 || goto STARTUP_FAILED
 
 echo [3/8] Khoi dong User Service (Port 5001)...
-start "User Service (:5001)" /D "%~dp0" "%ComSpec%" /k node services\user-service\server.js
+start "User Service (:5001)" /D "%~dp0" "%ComSpec%" /k node --watch services\user-service\server.js
 call :WAIT_FOR_URL "User Service" "http://127.0.0.1:5001/health" 60 || goto STARTUP_FAILED
 
 echo [4/8] Khoi dong Social Content Service (Port 5002)...
-start "Post Service (:5002)" /D "%~dp0" "%ComSpec%" /k "set AI_SERVICE_URL=http://127.0.0.1:8001&& set FASTAPI_URL=http://127.0.0.1:8000&& node services\post-service\server.js"
+start "Post Service (:5002)" /D "%~dp0" "%ComSpec%" /k "set AI_SERVICE_URL=http://127.0.0.1:8001&& set FASTAPI_URL=http://127.0.0.1:8000&& node --watch services\post-service\server.js"
 call :WAIT_FOR_URL "Social Content Service" "http://127.0.0.1:5002/health" 60 || goto STARTUP_FAILED
 
 echo [5/8] Khoi dong Moderation Service (Port 5003)...
-start "Moderation Service (:5003)" /D "%~dp0" "%ComSpec%" /k node services\moderation-service\server.js
+start "Moderation Service (:5003)" /D "%~dp0" "%ComSpec%" /k node --watch services\moderation-service\server.js
 call :WAIT_FOR_URL "Moderation Service" "http://127.0.0.1:5003/health" 60 || goto STARTUP_FAILED
 
 echo [6/8] Khoi dong Realtime ^& Notification Service (Port 5004)...
-start "Notification Service (:5004)" /D "%~dp0" "%ComSpec%" /k node services\notification-service\server.js
+start "Notification Service (:5004)" /D "%~dp0" "%ComSpec%" /k node --watch services\notification-service\server.js
 call :WAIT_FOR_URL "Realtime / Notification Service" "http://127.0.0.1:5004/health" 60 || goto STARTUP_FAILED
 
 echo [7/8] Khoi dong API Gateway (Port 5000)...
-start "API Gateway (:5000)" /D "%~dp0" "%ComSpec%" /k node gateway\server.js
+start "API Gateway (:5000)" /D "%~dp0" "%ComSpec%" /k node --watch gateway\server.js
 call :WAIT_FOR_URL "API Gateway" "http://127.0.0.1:5000/api/gateway/routes" 30 || goto STARTUP_FAILED
 
 echo [8/8] Khoi dong Frontend React Vite (Port 5173)...

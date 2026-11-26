@@ -3,9 +3,9 @@ import { createPortal } from 'react-dom';
 import { 
   MessageCircle, Share2, Bookmark, MoreHorizontal, ShieldCheck, Reply, 
   CheckCircle2, Send, ThumbsUp, Flag, Scale, ShieldAlert, AlertCircle, Pencil, Trash2, ExternalLink,
-  Image as ImageIcon, X, Eye, EyeOff, Loader2, Sparkles, Timer, Lock, Globe, Users, UserX
+  Image as ImageIcon, X, Eye, EyeOff, Loader2, Sparkles, Timer, Lock, Globe, Users, UserX, Pin
 } from 'lucide-react';
-import { appealCommentModeration, appealPostModeration, sharePost, updateCommentReaction, updatePostReaction, uploadPostImage, toggleSavePostApi } from '../api/client';
+import { appealCommentModeration, appealPostModeration, sharePost, updateComment, updateCommentReaction, updatePostReaction, uploadPostImage, toggleSavePostApi, togglePinPostApi } from '../api/client';
 import {
   applyReactionCounts,
   applyReactionState,
@@ -17,7 +17,7 @@ import {
 } from '../utils/reactionLogic';
 import { DEFAULT_AVATAR } from '../constants/defaults';
 import { computeMeasuredPopoverPlacement } from '../utils/popoverLogic';
-import { canDeletePost, canEditPost, canReportPost } from '../utils/postActionLogic';
+import { canDeletePost, canEditPost, canPinPost, canReportPost, isHardHiddenViolationPost } from '../utils/postActionLogic';
 import { getModerationNoticeText, moderationViolationNotice } from '../utils/moderationNoticeLogic';
 import { canSubmitImageAppeal, shouldHideContentForViewer, shouldShowPostAiLabel } from '../utils/imageModerationReviewLogic';
 import { shouldClosePostMenuForPointer } from '../utils/menuLogic';
@@ -134,9 +134,13 @@ export default function PostCard({
   targetType = null,
   targetActor = null,
   targetCommentId = null,
-  onToggleSave
+  onToggleSave,
+  onTogglePin,
+  showPinnedBadge = false,
+  inCommentModal = false
 }) {
-  const [showComments, setShowComments] = useState(false);
+  const [showComments, setShowComments] = useState(Boolean(inCommentModal));
+  const [showCommentModal, setShowCommentModal] = useState(false);
   const [highlightedCommentId, setHighlightedCommentId] = useState(null);
   const [commentText, setCommentText] = useState('');
   const [commentImageFile, setCommentImageFile] = useState(null);
@@ -147,6 +151,9 @@ export default function PostCard({
   const [replyImageFile, setReplyImageFile] = useState(null);
   const [replyImagePreview, setReplyImagePreview] = useState('');
   const [isUploadingReplyImage, setIsUploadingReplyImage] = useState(false);
+  const [editingComment, setEditingComment] = useState(null); // { id, text }
+  const [isSavingCommentEdit, setIsSavingCommentEdit] = useState(false);
+  const [commentEditError, setCommentEditError] = useState('');
   const commentInputRef = useRef(null);
 
   const handleReplyToComment = (targetComment) => {
@@ -327,10 +334,55 @@ export default function PostCard({
   const [isSaved, setIsSaved] = useState(Boolean(post.isSaved));
   const [isSaving, setIsSaving] = useState(false);
   const [saveToast, setSaveToast] = useState(false);
+  const [isPinned, setIsPinned] = useState(Boolean(post.isPinned || post.is_pinned) && !isHardHiddenViolationPost(post));
+  const [isPinning, setIsPinning] = useState(false);
 
   useEffect(() => {
     setIsSaved(Boolean(post.isSaved));
   }, [post.isSaved]);
+
+  useEffect(() => {
+    setIsPinned(Boolean(post.isPinned || post.is_pinned) && !isHardHiddenViolationPost(post));
+  }, [post.isPinned, post.is_pinned, post.ai_status, post.moderationStatus, post.aiStatus?.status, post.imageModeration?.status, post.image_moderation_status, post.isHidden, post.isHardHidden]);
+
+  const handleTogglePin = async (e) => {
+    if (e) e.stopPropagation();
+    closePostMenu();
+    if (!currentUser?.id) {
+      if (onRequireLogin) onRequireLogin();
+      else if (onRequireAuth) onRequireAuth('Vui lòng đăng nhập để ghim bài viết');
+      return;
+    }
+    if (isHardHiddenViolationPost(post)) {
+      setSaveToast('Không thể ghim bài viết đang bị ẩn hoặc đang chờ xử lý do vi phạm tiêu chuẩn cộng đồng');
+      setTimeout(() => setSaveToast(false), 3000);
+      return;
+    }
+
+    const previousPinned = isPinned;
+    const nextPinned = !previousPinned;
+    setIsPinned(nextPinned);
+    setIsPinning(true);
+
+    try {
+      const res = await togglePinPostApi(post.id, nextPinned);
+      const serverPinned = res?.isPinned ?? Boolean(res?.data?.isPinned ?? nextPinned);
+      const serverPinnedAt = res?.pinnedAt ?? res?.data?.pinnedAt ?? (serverPinned ? new Date().toISOString() : null);
+      setIsPinned(serverPinned);
+      post.isPinned = serverPinned;
+      post.pinnedAt = serverPinnedAt;
+      setSaveToast(res?.message || (serverPinned ? 'Đã ghim bài viết lên đầu trang cá nhân' : 'Đã bỏ ghim bài viết khỏi trang cá nhân'));
+      setTimeout(() => setSaveToast(false), 2400);
+      onTogglePin?.(post.id, serverPinned, serverPinnedAt, res?.data);
+    } catch (err) {
+      setIsPinned(previousPinned);
+      post.isPinned = previousPinned;
+      setSaveToast(err.message || 'Không thể cập nhật trạng thái ghim bài viết');
+      setTimeout(() => setSaveToast(false), 2600);
+    } finally {
+      setIsPinning(false);
+    }
+  };
 
   const handleToggleSave = async (e) => {
     if (e) e.stopPropagation();
@@ -485,6 +537,7 @@ export default function PostCard({
   const allowEdit = canEditPost(post, currentUser);
   const allowDelete = canDeletePost(post, currentUser);
   const allowReport = canReportPost(post, currentUser);
+  const allowPin = canPinPost(post, currentUser);
 
   const closePostMenu = useCallback(() => {
     if (usesSharedMenuState) onClosePostMenu();
@@ -730,6 +783,49 @@ export default function PostCard({
     await doSubmitReply(false);
   };
 
+  const handleSaveCommentEdit = async (targetId, targetText, forceComment = false) => {
+    if (!currentUser?.id || isSavingCommentEdit) return;
+    const trimmed = String(targetText ?? '').trim();
+    if (!trimmed) {
+      setCommentEditError('Nội dung bình luận không được để trống.');
+      return;
+    }
+    setIsSavingCommentEdit(true);
+    setCommentEditError('');
+    try {
+      const res = await updateComment({
+        userId: currentUser.id,
+        postId: post.id,
+        commentId: targetId,
+        content: trimmed,
+        forceComment,
+      });
+      if (res?.nudge) {
+        setCommentNudgeData({
+          mode: 'edit',
+          commentId: targetId,
+          rawText: trimmed,
+          message: res.message,
+          warningType: res.warningType,
+          contentSnippet: trimmed,
+        });
+        return;
+      }
+      const updated = res?.data;
+      if (updated) {
+        const nextComments = (post.comments || []).map((c) =>
+          String(c.id) === String(targetId) ? { ...c, ...updated } : c
+        );
+        onUpdatePost?.(post.id, { comments: nextComments, commentsCount: post.commentsCount });
+      }
+      setEditingComment(null);
+    } catch (err) {
+      setCommentEditError(err.message || 'Không thể cập nhật bình luận.');
+    } finally {
+      setIsSavingCommentEdit(false);
+    }
+  };
+
   const handleShare = () => {
     if (post.privacy && !['public'].includes(post.privacy)) return;
     if (!currentUser?.id) {
@@ -838,14 +934,56 @@ export default function PostCard({
   const isSensitivePost = isToxicText || isNsfwImage;
   const hidePostContent = shouldHideContentForViewer({ isAuthor, status: postImageStatus, isSensitive: isSensitivePost });
 
+  useEffect(() => {
+    if (!showCommentModal) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') setShowCommentModal(false);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showCommentModal]);
+
+  const handleOpenCommentsView = () => {
+    if (!inCommentModal && !isTargeted) {
+      setShowCommentModal(true);
+      return;
+    }
+    setShowComments((prev) => !prev);
+  };
+
   return (
     <div 
-      id={`post-${post.id}`}
-      className={`bg-white dark:bg-slate-900 rounded-2xl border mb-5 overflow-hidden shadow-xs hover:border-slate-300/80 dark:hover:border-slate-700 transition-all duration-300 ${
-        post.ai_status === 'hidden' ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200/80 dark:border-slate-800'
-      }`}
+      id={inCommentModal ? undefined : `post-${post.id}`}
+      className={inCommentModal
+        ? 'bg-white dark:bg-slate-900 overflow-hidden'
+        : `bg-white dark:bg-slate-900 rounded-2xl border mb-5 overflow-hidden shadow-xs hover:border-slate-300/80 dark:hover:border-slate-700 transition-all duration-300 ${
+            post.ai_status === 'hidden' ? 'border-rose-300 bg-rose-50/20' : 'border-slate-200/80 dark:border-slate-800'
+          }`}
     >
       {/* Banner cảnh báo bài viết bị ẩn cứng */}
+      {showPinnedBadge && isPinned && !isHardHiddenViolationPost(post) && (
+        <div className="px-4 py-2 bg-amber-50/90 dark:bg-amber-950/30 border-b border-amber-200/80 dark:border-amber-900/50 flex items-center justify-between text-xs font-bold text-amber-800 dark:text-amber-300">
+          <div className="flex items-center gap-1.5">
+            <Pin className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 fill-amber-500/20" />
+            <span>Bài viết đã ghim trên trang cá nhân</span>
+          </div>
+          {allowPin && (
+            <button
+              type="button"
+              disabled={isPinning}
+              onClick={handleTogglePin}
+              className="text-[11px] font-semibold text-amber-700 dark:text-amber-300 hover:underline cursor-pointer disabled:opacity-50"
+            >
+              Bỏ ghim
+            </button>
+          )}
+        </div>
+      )}
       {post.ai_status === 'hidden' && (
         <div className="p-3.5 bg-rose-50 border-b border-rose-200 text-xs flex items-center justify-between gap-3 text-rose-900">
           <div className="flex items-center gap-2">
@@ -898,7 +1036,7 @@ export default function PostCard({
             alt={post.author?.name || 'Tác giả'} 
             onError={(e) => { e.currentTarget.src = DEFAULT_AVATAR; }}
             onClick={() => onOpenProfile && onOpenProfile(post.author)}
-            className="w-11 h-11 rounded-full object-cover ring-2 ring-slate-100 cursor-pointer hover:opacity-90 transition shrink-0"
+            className="w-11 h-11 rounded-full object-cover ring-2 ring-slate-100 dark:ring-slate-750 cursor-pointer hover:ring-2 hover:ring-blue-400 dark:hover:ring-blue-500 transition shrink-0"
           />
           <div>
             <div className="flex items-center gap-1.5">
@@ -968,7 +1106,18 @@ export default function PostCard({
             </button>
 
             {showPostMenu && (
-              <div ref={menuRef} role="menu" className="absolute right-0 top-8 z-30 w-48 bg-white rounded-2xl shadow-xl border border-slate-200 py-1.5 animate-fade-in text-xs">
+              <div ref={menuRef} role="menu" className="absolute right-0 top-8 z-30 w-52 bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-700 py-1.5 animate-fade-in text-xs">
+                {allowPin && (
+                  <button
+                    role="menuitem"
+                    disabled={isPinning}
+                    onClick={handleTogglePin}
+                    className="w-full px-3 py-2 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 font-semibold transition cursor-pointer disabled:opacity-50"
+                  >
+                    <Pin className={`w-4 h-4 ${isPinned ? 'text-amber-600 fill-amber-500' : 'text-slate-500'}`} />
+                    <span>{isPinned ? 'Bỏ ghim khỏi trang cá nhân' : 'Ghim lên trang cá nhân'}</span>
+                  </button>
+                )}
                 {allowEdit && (
                   <button
                     role="menuitem"
@@ -1308,7 +1457,7 @@ export default function PostCard({
           </PortalPopover>
         </button>
         <div className="flex items-center gap-3">
-          <span onClick={() => setShowComments(!showComments)} className="cursor-pointer hover:underline">{visibleComments.length} bình luận</span>
+          <span onClick={handleOpenCommentsView} className="cursor-pointer hover:underline">{visibleComments.length} bình luận</span>
           <span>{localSharesCount} chia sẻ</span>
         </div>
       </div>
@@ -1410,7 +1559,7 @@ export default function PostCard({
         </div>
 
         <button
-          onClick={() => setShowComments(!showComments)}
+          onClick={handleOpenCommentsView}
           className={`flex-1 py-2 flex items-center justify-center gap-1.5 sm:gap-2 rounded-xl text-xs sm:text-sm font-semibold transition duration-150 cursor-pointer ${
             isCooldown
               ? 'text-amber-700 dark:text-amber-300 bg-amber-50/80 dark:bg-amber-950/30'
@@ -1470,42 +1619,44 @@ export default function PostCard({
             </div>
           )}
 
-          {/* Form nhập bình luận mới */}
-          <CommentInputBar
-            avatar={currentUser?.avatar}
-            userName={currentUser?.name || 'Khách'}
-            value={commentText}
-            onChange={setCommentText}
-            onSubmit={handleCommentSubmit}
-            disabled={isBanned || isCooldown}
-            isSubmitting={isUploadingCommentImage}
-            hasContent={Boolean(commentImageFile)}
-            imagePreview={commentImagePreview}
-            onSelectImageFile={handleCommentImageSelect}
-            onRemoveImage={handleRemoveCommentImage}
-            inputRef={commentInputRef}
-            onInputClick={() => {
-              if (!currentUser && onRequireAuth) {
-                onRequireAuth("Chỉ đăng nhập mới được bình luận, khi bấm vào nút bình luận mà chưa đăng nhập sẽ bị chuyển tới màn hình đăng nhập (User Story 5)");
+          {/* Form nhập bình luận mới (ẩn trong phần cuộn của modal vì đã ghim cố định ở đáy modal) */}
+          {!inCommentModal && (
+            <CommentInputBar
+              avatar={currentUser?.avatar}
+              userName={currentUser?.name || 'Khách'}
+              value={commentText}
+              onChange={setCommentText}
+              onSubmit={handleCommentSubmit}
+              disabled={isBanned || isCooldown}
+              isSubmitting={isUploadingCommentImage}
+              hasContent={Boolean(commentImageFile)}
+              imagePreview={commentImagePreview}
+              onSelectImageFile={handleCommentImageSelect}
+              onRemoveImage={handleRemoveCommentImage}
+              inputRef={commentInputRef}
+              onInputClick={() => {
+                if (!currentUser && onRequireAuth) {
+                  onRequireAuth("Chỉ đăng nhập mới được bình luận, khi bấm vào nút bình luận mà chưa đăng nhập sẽ bị chuyển tới màn hình đăng nhập (User Story 5)");
+                }
+              }}
+              onImageButtonClick={() => {
+                if (!currentUser && onRequireAuth) {
+                  onRequireAuth("Chỉ đăng nhập mới được bình luận, khi bấm vào nút bình luận mà chưa đăng nhập sẽ bị chuyển tới màn hình đăng nhập (User Story 5)");
+                  return false;
+                }
+                return true;
+              }}
+              placeholder={
+                isBanned
+                  ? "Tài khoản của bạn đã bị khóa. Không thể bình luận..."
+                  : isCooldown
+                  ? `🚫 Bạn đang bị cấm bình luận • Gỡ phạt sau: ${cooldownRemainingStr || 'Đang đếm...'}`
+                  : currentUser
+                  ? "Viết bình luận công khai..."
+                  : "Đăng nhập để viết bình luận..."
               }
-            }}
-            onImageButtonClick={() => {
-              if (!currentUser && onRequireAuth) {
-                onRequireAuth("Chỉ đăng nhập mới được bình luận, khi bấm vào nút bình luận mà chưa đăng nhập sẽ bị chuyển tới màn hình đăng nhập (User Story 5)");
-                return false;
-              }
-              return true;
-            }}
-            placeholder={
-              isBanned
-                ? "Tài khoản của bạn đã bị khóa. Không thể bình luận..."
-                : isCooldown
-                ? `🚫 Bạn đang bị cấm bình luận • Gỡ phạt sau: ${cooldownRemainingStr || 'Đang đếm...'}`
-                : currentUser
-                ? "Viết bình luận công khai..."
-                : "Đăng nhập để viết bình luận..."
-            }
-          />
+            />
+          )}
 
           {/* Danh sách bình luận (mới nhất trên cùng, hỗ trợ phân cấp trả lời) */}
           <div className="space-y-3 pt-1">
@@ -1737,7 +1888,56 @@ export default function PostCard({
                             )}
                           </div>
                         </div>
-                        {comment.content && <p className="text-slate-700 dark:text-slate-200 whitespace-pre-line leading-relaxed"><HashtagText text={comment.content} /></p>}
+                        {editingComment && String(editingComment.id) === String(comment.id) ? (
+                          <div className="mt-1 space-y-1.5">
+                            <textarea
+                              rows={2}
+                              autoFocus
+                              value={editingComment.text}
+                              onChange={(e) => {
+                                setCommentEditError('');
+                                setEditingComment((prev) => (prev ? { ...prev, text: e.target.value } : prev));
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                  setEditingComment(null);
+                                  setCommentEditError('');
+                                } else if (e.key === 'Enter' && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleSaveCommentEdit(comment.id, editingComment.text, false);
+                                }
+                              }}
+                              className="w-full rounded-xl border border-blue-300 dark:border-blue-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/30 resize-none"
+                              placeholder="Nhập nội dung bình luận..."
+                            />
+                            {commentEditError && (
+                              <p className="text-[11px] font-medium text-rose-600 dark:text-rose-400">{commentEditError}</p>
+                            )}
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                disabled={isSavingCommentEdit}
+                                onClick={() => {
+                                  setEditingComment(null);
+                                  setCommentEditError('');
+                                }}
+                                className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                              >
+                                Hủy
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isSavingCommentEdit || !editingComment.text.trim()}
+                                onClick={() => handleSaveCommentEdit(comment.id, editingComment.text, false)}
+                                className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold disabled:opacity-50 cursor-pointer"
+                              >
+                                {isSavingCommentEdit ? 'Đang lưu...' : 'Lưu'}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          comment.content && <p className="text-slate-700 dark:text-slate-200 whitespace-pre-line leading-relaxed"><HashtagText text={comment.content} /></p>
+                        )}
 
                         {comment.image && (
                           <div className="mt-2 relative rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 max-w-xs group">
@@ -1795,23 +1995,39 @@ export default function PostCard({
                               {comment.replies.length} phản hồi
                             </span>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => onOpenReportModal && onOpenReportModal({
-                              targetType: 'comment',
-                              targetId: comment.id,
-                              parentPostId: post.id,
-                              targetAuthor: comment.author,
-                              contentExcerpt: comment.content || (comment.image ? '[Hình ảnh]' : ''),
-                              imageUrl: comment.image || null,
-                              aiStatus: { label: comment.ai_label || 'Normal', confidence: 0.90 }
-                            })}
-                            title="Báo cáo bình luận này"
-                            className="text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 px-1.5 py-0.5 rounded transition cursor-pointer flex items-center gap-1 ml-auto font-medium"
-                          >
-                            <Flag className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                            <span className="text-[11px] font-semibold text-rose-600 dark:text-rose-400">Báo cáo</span>
-                          </button>
+                          {isCommentAuthor && !isHardHidden && !isAdminImageReview && !isBanned && !isCooldown && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCommentEditError('');
+                                setEditingComment({ id: comment.id, text: comment.content || '' });
+                              }}
+                              title="Chỉnh sửa bình luận"
+                              className="text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 px-1.5 py-0.5 rounded transition cursor-pointer flex items-center gap-1 ml-auto font-semibold"
+                            >
+                              <Pencil className="w-3 h-3 shrink-0" />
+                              <span className="text-[11px]">Chỉnh sửa</span>
+                            </button>
+                          )}
+                          {!isCommentAuthor && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenReportModal && onOpenReportModal({
+                                targetType: 'comment',
+                                targetId: comment.id,
+                                parentPostId: post.id,
+                                targetAuthor: comment.author,
+                                contentExcerpt: comment.content || (comment.image ? '[Hình ảnh]' : ''),
+                                imageUrl: comment.image || null,
+                                aiStatus: { label: comment.ai_label || 'Normal', confidence: 0.90 }
+                              })}
+                              title="Báo cáo bình luận này"
+                              className="text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 px-1.5 py-0.5 rounded transition cursor-pointer flex items-center gap-1 ml-auto font-medium"
+                            >
+                              <Flag className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                              <span className="text-[11px] font-semibold text-rose-600 dark:text-rose-400">Báo cáo</span>
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1887,13 +2103,119 @@ export default function PostCard({
           onConfirmForce={async () => {
             const nudgeTarget = commentNudgeData;
             setCommentNudgeData(null);
-            if (nudgeTarget?.mode === 'reply') {
+            if (nudgeTarget?.mode === 'edit') {
+              await handleSaveCommentEdit(nudgeTarget.commentId, nudgeTarget.rawText, true);
+            } else if (nudgeTarget?.mode === 'reply') {
               await doSubmitReply(true, nudgeTarget.parentId);
             } else {
               await doSubmitComment(true);
             }
           }}
         />
+      )}
+      {!inCommentModal && showCommentModal && createPortal(
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 animate-fade-in"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setShowCommentModal(false);
+            }
+          }}
+        >
+          <div className="w-full max-w-2xl max-h-[90dvh] bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col overflow-hidden">
+            {/* Header cố định kiểu Facebook */}
+            <div className="relative px-4 py-3.5 border-b border-slate-200/80 dark:border-slate-800 flex items-center justify-center shrink-0 bg-white dark:bg-slate-900">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100 truncate px-10">
+                Bài viết của {post.author?.name || 'Người dùng'}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowCommentModal(false)}
+                aria-label="Đóng hộp thoại bình luận"
+                className="absolute right-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 flex items-center justify-center transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Nội dung bài viết & danh sách bình luận có thể cuộn */}
+            <div className="flex-1 overflow-y-auto overscroll-contain">
+              <PostCard
+                post={post}
+                currentUser={currentUser}
+                onToggleLike={onToggleLike}
+                onAddComment={onAddComment}
+                onOpenReportModal={onOpenReportModal}
+                onOpenAppealModal={onOpenAppealModal}
+                onRequireAuth={onRequireAuth}
+                onRequireLogin={onRequireLogin}
+                onOpenProfile={onOpenProfile}
+                onEditPost={onEditPost}
+                onDeletePost={onDeletePost}
+                onDismissNotice={onDismissNotice}
+                onSharePost={onSharePost}
+                allPosts={allPosts}
+                onUpdatePost={onUpdatePost}
+                onToggleSave={onToggleSave}
+                onTogglePin={onTogglePin}
+                showPinnedBadge={showPinnedBadge}
+                inCommentModal={true}
+              />
+            </div>
+
+            {/* Thanh nhập bình luận ghim cố định ở đáy modal */}
+            <div className="px-4 py-3 border-t border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 shrink-0 space-y-2">
+              {isCooldown && (
+                <div className="px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-100 text-xs flex items-center justify-between gap-2">
+                  <span className="font-semibold flex items-center gap-1.5">
+                    <Timer className="w-3.5 h-3.5 text-amber-600" />
+                    Đang bị vô hiệu hóa bình luận
+                  </span>
+                  <span className="font-mono font-bold text-rose-600 dark:text-rose-400">
+                    {cooldownRemainingStr || 'Đang đếm...'}
+                  </span>
+                </div>
+              )}
+              <CommentInputBar
+                autoFocus
+                avatar={currentUser?.avatar}
+                userName={currentUser?.name || 'Khách'}
+                value={commentText}
+                onChange={setCommentText}
+                onSubmit={handleCommentSubmit}
+                disabled={isBanned || isCooldown}
+                isSubmitting={isUploadingCommentImage}
+                hasContent={Boolean(commentImageFile)}
+                imagePreview={commentImagePreview}
+                onSelectImageFile={handleCommentImageSelect}
+                onRemoveImage={handleRemoveCommentImage}
+                inputRef={commentInputRef}
+                onInputClick={() => {
+                  if (!currentUser && onRequireAuth) {
+                    onRequireAuth("Chỉ đăng nhập mới được bình luận, khi bấm vào nút bình luận mà chưa đăng nhập sẽ bị chuyển tới màn hình đăng nhập (User Story 5)");
+                  }
+                }}
+                onImageButtonClick={() => {
+                  if (!currentUser && onRequireAuth) {
+                    onRequireAuth("Chỉ đăng nhập mới được bình luận, khi bấm vào nút bình luận mà chưa đăng nhập sẽ bị chuyển tới màn hình đăng nhập (User Story 5)");
+                    return false;
+                  }
+                  return true;
+                }}
+                placeholder={
+                  isBanned
+                    ? "Tài khoản của bạn đã bị khóa. Không thể bình luận..."
+                    : isCooldown
+                    ? `🚫 Bạn đang bị cấm bình luận • Gỡ phạt sau: ${cooldownRemainingStr || 'Đang đếm...'}`
+                    : currentUser
+                    ? `Bình luận dưới tên ${currentUser.name || 'bạn'}...`
+                    : "Đăng nhập để viết bình luận..."
+                }
+              />
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );

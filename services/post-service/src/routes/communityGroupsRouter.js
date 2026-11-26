@@ -296,5 +296,29 @@ export function createCommunityGroupsRouter({ pool, realtimeService = null }) {
     res.json({ success: true, data });
   }));
 
+  router.put('/:groupId/settings', requireAuth, asyncRoute(async (req, res) => {
+    const data = await service.updateGroupSettings({
+      groupId: req.params.groupId,
+      user: req.user,
+      name: req.body?.name,
+      description: req.body?.description,
+      rules: req.body?.rules,
+      privacy: req.body?.privacy,
+      isDiscoverable: req.body?.isDiscoverable,
+      postApprovalMode: req.body?.postApprovalMode,
+    });
+    res.json({ success: true, data });
+  }));
+
+  router.put('/:groupId/posts/:postId/pin', requireAuth, asyncRoute(async (req, res) => {
+    const data = await service.togglePinPost({
+      groupId: req.params.groupId,
+      postId: req.params.postId,
+      user: req.user,
+      isPinned: req.body?.isPinned,
+    });
+    res.json({ success: true, data });
+  }));
+
   return router;
 }

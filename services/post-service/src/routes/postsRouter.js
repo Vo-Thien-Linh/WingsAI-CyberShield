@@ -22,8 +22,10 @@ export function createPostsRouter({ pool }) {
   router.put('/:postId', requireAuth, postsController.editPost);
   router.delete('/:postId', requireAuth, postsController.deletePost);
   router.post('/:postId/comments', requireAuth, postsController.createComment);
+  router.put('/:postId/comments/:commentId', requireAuth, postsController.editComment);
   router.post('/:postId/share', requireAuth, postsController.sharePost);
   router.post('/:postId/save', requireAuth, postsController.toggleSavePost);
+  router.put('/:postId/pin', requireAuth, postsController.togglePinPost);
 
   return router;
 }

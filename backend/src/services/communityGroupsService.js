@@ -1,4 +1,5 @@
 import { calculateTrustDeduction } from './trustScoreService.js';
+import { harmonizeModeration } from '../utils/moderationHarmonizer.js';
 import { consumeCloudinaryCleanupTicket, verifyCloudinaryCleanupTicket } from '../utils/cloudinaryCleanupTicket.js';
 
 export function createCommunityGroupsService({
@@ -104,6 +105,18 @@ export function createCommunityGroupsService({
       source: imageResult.source || 'efficientnet-b1',
     };
   };
+  const normalizeImageModerationForPolicy = (imageModeration) => {
+    if (!imageModeration) return null;
+    if (imageModeration.decision === 'pending_review') {
+      if (imageModeration.confidenceLabel === 'Bạo lực') {
+        return { ...imageModeration, decision: 'rejected' };
+      }
+      if (imageModeration.confidenceLabel === 'Nhạy cảm') {
+        return { ...imageModeration, decision: 'sensitive' };
+      }
+    }
+    return imageModeration;
+  };
   const moderateGroupPostPayload = async ({ group, cleanContent, requestedImageUrl, existingImageUrl = null, existingImageModeration = null }) => {
     let suggestion = cleanContent
       ? { label: 'Review needed', confidence: null, action: 'review', source: 'unavailable' }
@@ -135,28 +148,44 @@ export function createCommunityGroupsService({
       }
     }
 
-    const autoApproved = group.postApprovalMode === 'automatic'
-      && moderationAvailable
-      && ['Normal', 'No text'].includes(suggestion.label)
-      && suggestion.action === 'allow'
-      && (!cleanContent || suggestion.confidence >= 0.9)
-      && (!imageModeration || imageModeration.decision === 'safe');
+    const rawTextLabel = suggestion.label;
+    const policyImageModeration = normalizeImageModerationForPolicy(imageModeration);
+    const harmonized = harmonizeModeration({
+      textMod: suggestion,
+      imageModeration: policyImageModeration,
+      contentType: 'post',
+    });
+    const labelRank = { 'No text': 0, Normal: 0, 'Review needed': 1, Toxic: 2, 'Hate Speech': 3, Violence: 4 };
+    if ((labelRank[harmonized.finalLabel] || 0) > (labelRank[suggestion.label] || 0)) {
+      suggestion = {
+        ...suggestion,
+        label: harmonized.finalLabel,
+        confidence: harmonized.confidence ?? suggestion.confidence,
+      };
+    }
 
     const authorIsAdmin = ['owner', 'admin'].includes(group.currentRole);
-    const totalViolationPenalty = calculateTrustDeduction(suggestion.label, imageModeration?.decision || 'safe');
-    const authorTrustPenalty = authorIsAdmin ? totalViolationPenalty : 0;
-    const adminPostRejected = authorIsAdmin
-      && (['Hate Speech', 'Violence'].includes(suggestion.label) || imageModeration?.decision === 'rejected');
+    const totalViolationPenalty = calculateTrustDeduction(rawTextLabel, policyImageModeration?.decision || 'safe');
+    const isAutoModeHandledByAi = group.postApprovalMode === 'automatic' && moderationAvailable;
+    const isHardRejectedByAi = harmonized.isHidden || ['Hate Speech', 'Violence'].includes(suggestion.label) || policyImageModeration?.decision === 'rejected';
+    const adminPostRejected = authorIsAdmin && isHardRejectedByAi;
+    const autoPostRejected = !authorIsAdmin && isAutoModeHandledByAi && isHardRejectedByAi;
+    const autoPostApproved = !authorIsAdmin && isAutoModeHandledByAi && !isHardRejectedByAi;
+    const authorTrustPenalty = (authorIsAdmin || isAutoModeHandledByAi) ? totalViolationPenalty : 0;
     const reviewStatus = authorIsAdmin
       ? (adminPostRejected ? 'rejected' : 'approved')
-      : (autoApproved ? 'approved' : 'pending');
+      : isAutoModeHandledByAi
+        ? (autoPostRejected ? 'rejected' : 'approved')
+        : 'pending';
     const reviewNote = adminPostRejected
       ? 'AI tự động từ chối bài vi phạm nghiêm trọng do quản trị viên đăng.'
       : authorIsAdmin
         ? 'Bài của quản trị viên được đăng trực tiếp; AI vẫn kiểm tra nội dung.'
-        : autoApproved
-          ? 'Tự động duyệt: AI đánh giá nội dung an toàn với độ tin cậy cao.'
-          : null;
+        : autoPostRejected
+          ? 'Tự động từ chối: AI phát hiện nội dung vi phạm chính sách Bạo lực / Ngôn từ thù ghét.'
+          : autoPostApproved
+            ? 'Tự động duyệt bởi AI theo quy chuẩn nội dung.'
+            : null;
 
     return { cleanImageUrl, imageModeration, suggestion, reviewStatus, reviewNote, authorTrustPenalty };
   };
@@ -568,7 +597,24 @@ export function createCommunityGroupsService({
       if (!candidate || candidate.status !== 'pending') {
         throw fail('Bài viết không còn chờ duyệt hoặc bạn không có quyền xử lý', 409);
       }
-      const authorTrustPenalty = calculateTrustDeduction(candidate.aiLabel, candidate.imageModeration?.decision || 'safe');
+      const policyImageModeration = normalizeImageModerationForPolicy(candidate.imageModeration);
+      const harmonized = decision === 'approved'
+        ? harmonizeModeration({
+            textMod: {
+              label: candidate.aiLabel || 'Normal',
+              confidence: candidate.aiConfidence ?? 1.0,
+            },
+            imageModeration: policyImageModeration,
+            contentType: 'post',
+          })
+        : null;
+      const autoRejectedAfterApproval = Boolean(harmonized?.isHidden);
+      const effectiveDecision = autoRejectedAfterApproval ? 'rejected' : decision;
+      const cleanReason = String(reason).trim().slice(0, 500);
+      const effectiveReason = autoRejectedAfterApproval
+        ? (cleanReason || harmonized.notificationMessage || 'Bài viết vi phạm chính sách Bạo lực / Ngôn từ thù ghét nên bị hệ thống từ chối sau khi duyệt.')
+        : cleanReason;
+      const authorTrustPenalty = calculateTrustDeduction(candidate.aiLabel, policyImageModeration?.decision || 'safe');
       const moderatorTrustPenalty = decision === 'approved'
         && String(candidate.authorId) !== String(user.id)
         ? authorTrustPenalty
@@ -577,10 +623,11 @@ export function createCommunityGroupsService({
         groupId,
         postId,
         reviewerId: user.id,
-        decision,
-        reason: String(reason).trim().slice(0, 500),
+        decision: effectiveDecision,
+        reason: effectiveReason,
         authorTrustPenalty,
         moderatorTrustPenalty,
+        applyCooldownMinutes: autoRejectedAfterApproval && harmonized.applyCooldown ? harmonized.cooldownMinutes : 0,
       });
       if (!reviewed) throw fail('Bài viết không còn chờ duyệt hoặc bạn không có quyền xử lý', 409);
       if (reviewed.status === 'approved') {
@@ -593,6 +640,7 @@ export function createCommunityGroupsService({
       }
       return {
         ...reviewed,
+        systemBlockedByAi: autoRejectedAfterApproval,
         authorTrustPenalty: reviewed.authorTrustPenalty ?? authorTrustPenalty,
         moderatorTrustPenalty: reviewed.moderatorTrustPenalty ?? moderatorTrustPenalty,
       };
@@ -691,7 +739,9 @@ export function createCommunityGroupsService({
       const post = await repository.findPostById({ groupId, postId });
       if (!post) throw fail('Không tìm thấy bài viết trong nhóm', 404);
       if (String(post.authorId) !== String(user.id)) throw fail('Chỉ tác giả mới có thể gửi kháng cáo', 403);
-      if (post.status !== 'rejected' && post.aiLabel === 'Normal') {
+      const policyImg = normalizeImageModerationForPolicy(post.imageModeration);
+      const hasImageViolation = ['sensitive', 'rejected'].includes(policyImg?.decision);
+      if (post.status !== 'rejected' && (!post.aiLabel || ['Normal', 'No text'].includes(post.aiLabel)) && !hasImageViolation) {
         throw fail('Bài viết này không ở trạng thái bị từ chối hoặc gắn nhãn vi phạm', 400);
       }
       try {
@@ -818,6 +868,71 @@ export function createCommunityGroupsService({
         groupId,
         groupPrivacy: privacy,
         payload: { groupId, privacy },
+      });
+      return updated;
+    },
+
+    async updateGroupSettings({ groupId, user, name, description, rules, privacy, isDiscoverable, postApprovalMode }) {
+      requireUser(user);
+      requireGroupId(groupId);
+      const group = await requireGroup(groupId, user.id);
+      requireGroupAdmin(group);
+
+      const cleanName = typeof name === 'string' ? name.trim() : group.name;
+      if (!cleanName) throw fail('Tên nhóm là bắt buộc', 400);
+      if (cleanName.length > 100) throw fail('Tên nhóm không được vượt quá 100 ký tự', 400);
+
+      const nextPrivacy = privacy !== undefined ? privacy : group.privacy;
+      if (!['public', 'private'].includes(nextPrivacy)) throw fail('Chế độ quyền riêng tư không hợp lệ', 400);
+
+      const nextApprovalMode = postApprovalMode !== undefined ? postApprovalMode : group.postApprovalMode;
+      if (!['manual', 'automatic'].includes(nextApprovalMode)) throw fail('Chế độ duyệt bài không hợp lệ', 400);
+
+      const nextDiscoverable = nextPrivacy === 'public'
+        ? true
+        : (isDiscoverable !== undefined ? Boolean(isDiscoverable) : Boolean(group.isDiscoverable));
+
+      const updated = await repository.updateGroupSettings({
+        groupId,
+        name: cleanName,
+        description: description !== undefined ? String(description).trim().slice(0, 1000) : (group.description || ''),
+        rules: rules !== undefined ? String(rules).trim().slice(0, 3000) : (group.rules || ''),
+        privacy: nextPrivacy,
+        isDiscoverable: nextDiscoverable,
+        postApprovalMode: nextApprovalMode,
+        actorId: user.id,
+      });
+      if (!updated) throw fail('Không thể cập nhật cài đặt nhóm', 404);
+      await emitGroupRealtime({
+        type: 'GROUP_UPDATED',
+        groupId,
+        groupPrivacy: nextPrivacy,
+        payload: { groupId, ...updated },
+      });
+      return updated;
+    },
+
+    async togglePinPost({ groupId, postId, user, isPinned }) {
+      requireUser(user);
+      requireGroupId(groupId);
+      requirePostId(postId);
+      const group = await requireGroup(groupId, user.id);
+      if (!isGroupModerator(group)) {
+        throw fail('Chỉ ban quản trị nhóm mới có quyền ghim hoặc bỏ ghim bài viết', 403);
+      }
+      await requireApprovedPost({ groupId, postId });
+      const updated = await repository.setPostPinned({
+        groupId,
+        postId,
+        isPinned: Boolean(isPinned),
+        actorId: user.id,
+      });
+      if (!updated) throw fail('Không thể cập nhật trạng thái ghim bài viết', 404);
+      await emitGroupRealtime({
+        type: 'GROUP_POST_UPDATED',
+        groupId,
+        groupPrivacy: group.privacy,
+        payload: { post: updated },
       });
       return updated;
     },

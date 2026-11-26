@@ -1,4 +1,4 @@
-﻿export function handleRealtimeFeedEvent(prevPosts, payload) {
+export function handleRealtimeFeedEvent(prevPosts, payload) {
   if (!Array.isArray(prevPosts) || !payload || !payload.type) return prevPosts;
 
   if (payload.type === 'POST_SHARED') {
@@ -47,6 +47,22 @@
           ...p,
           commentsCount: (p.commentsCount || 0) + 1,
           comments: [...(p.comments || []), comment],
+        };
+      }
+      return p;
+    });
+  }
+
+  if (payload.type === 'COMMENT_UPDATED') {
+    const { postId, comment } = payload;
+    if (!comment) return prevPosts;
+    return prevPosts.map((p) => {
+      if (String(p.id) === String(postId)) {
+        return {
+          ...p,
+          comments: (p.comments || []).map((c) =>
+            String(c.id) === String(comment.id) ? { ...c, ...comment } : c
+          ),
         };
       }
       return p;

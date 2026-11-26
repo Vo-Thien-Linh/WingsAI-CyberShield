@@ -87,7 +87,9 @@ CREATE TABLE IF NOT EXISTS posts (
     reports_count INT DEFAULT 0, -- Số lượt bị người dùng báo cáo vi phạm
     
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+    pinned_at TIMESTAMPTZ DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author_id, created_at DESC);
@@ -666,6 +668,8 @@ CREATE TABLE IF NOT EXISTS community_group_posts (
     reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL,
     reviewed_at TIMESTAMPTZ,
     review_note TEXT,
+    is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+    pinned_at TIMESTAMPTZ DEFAULT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT community_group_posts_status_check CHECK (review_status IN ('pending', 'approved', 'rejected')),

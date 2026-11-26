@@ -494,6 +494,7 @@ export default function ModeratorView({
                 >
                   <option value="all">Tất cả loại nội dung</option>
                   <option value="post">Bài viết</option>
+                  <option value="group_post">Bài viết nhóm</option>
                   <option value="comment">Bình luận</option>
                 </select>
 
@@ -605,7 +606,11 @@ export default function ModeratorView({
                           </td>
                           <td className="py-3 px-3">
                             <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
-                              {appeal.contentType === 'comment' ? 'Bình luận' : 'Bài viết'}
+                              {appeal.contentType === 'comment'
+                            ? 'Bình luận'
+                            : appeal.contentType === 'group_post'
+                              ? `Bài viết nhóm${appeal.groupName ? ` · ${appeal.groupName}` : ''}`
+                              : 'Bài viết'}
                             </span>
                           </td>
                           <td className="py-3 px-3">

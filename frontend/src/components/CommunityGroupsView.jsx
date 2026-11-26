@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
-  AlertTriangle, ArrowLeft, BookOpen, Check, CheckCircle2, Clock3, Globe2, ImagePlus,
-  LockKeyhole, MessageCircle, Plus, Search, Send, ShieldCheck, Sparkles, UserMinus, UsersRound, X,
+  AlertTriangle, ArrowLeft, Bookmark, BookOpen, Calendar, Check, CheckCircle2, Clock3, Globe2, ImagePlus,
+  Info, LockKeyhole, MessageCircle, Pin, Plus, Search, Send, Settings, ShieldCheck, Sparkles, UserMinus, UsersRound, X,
 } from 'lucide-react';
 import {
   createCommunityGroup,
@@ -15,6 +16,7 @@ import {
   fetchCommunityGroupReports,
   fetchCommunityGroupReviewQueue,
   fetchCommunityGroups,
+  fetchSavedCommunityGroupPosts,
   joinCommunityGroup,
   leaveCommunityGroup,
   removeCommunityGroupMember,
@@ -25,10 +27,12 @@ import {
   updateCommunityGroupMemberRole,
   updateCommunityGroupPostApprovalMode,
   updateCommunityGroupPrivacy,
+  updateCommunityGroupSettings,
   previewPostImage,
   uploadCommunityGroupPostImage,
   cleanupCommunityGroupPostImage,
 } from '../api/client';
+import { DEFAULT_AVATAR } from '../constants/defaults';
 import { validateImageFile } from '../utils/imageLogic';
 import { getHashtagHighlightParts } from '../utils/hashtagHighlight';
 import { getGroupModerationSourceLabel, selectGroupModerationPreview } from '../utils/groupModerationPreview';
@@ -210,7 +214,7 @@ function CreateGroupDialog({ onClose, onCreate, busy }) {
 function GroupPost({ post, ownPost, onAppeal }) {
   const pending = post.status === 'pending';
   const rejected = post.status === 'rejected';
-  const blurImage = ['sensitive', 'pending_review', 'rejected'].includes(post.imageModeration?.decision);
+  const blurImage = ['sensitive', 'rejected'].includes(post.imageModeration?.decision);
   return (
     <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="flex items-start justify-between gap-3">
@@ -256,6 +260,13 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
   const [members, setMembers] = useState([]);
   const [memberRequests, setMemberRequests] = useState([]);
   const [search, setSearch] = useState('');
+  const [groupFilterTab, setGroupFilterTab] = useState('all'); // 'all' | 'joined' | 'managed' | 'saved'
+  const [savedGroupPosts, setSavedGroupPosts] = useState([]);
+  const [loadingSavedPosts, setLoadingSavedPosts] = useState(false);
+  const [inGroupPostSearch, setInGroupPostSearch] = useState('');
+  const [memberSearch, setMemberSearch] = useState('');
+  const [memberRoleFilter, setMemberRoleFilter] = useState('all'); // 'all' | 'staff' | 'member'
+  const [settingsForm, setSettingsForm] = useState({ name: '', description: '', rules: '', privacy: 'public', isDiscoverable: true, postApprovalMode: 'manual' });
   const [activePanel, setActivePanel] = useState('posts');
   const [postComposerOpen, setPostComposerOpen] = useState(false);
   const [postContent, setPostContent] = useState('');
@@ -273,8 +284,35 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
   const [joiningId, setJoiningId] = useState(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [toast, setToast] = useState(null);
   const postHashtagHighlightRef = useRef(null);
   const handledGroupRequestRef = useRef(null);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = setTimeout(() => setToast(null), toast.duration || 7000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    if (!notice) return;
+    setToast((prev) => (prev?.message === notice ? prev : {
+      id: Date.now(),
+      type: 'success',
+      title: 'Thông báo nhóm',
+      message: notice,
+    }));
+  }, [notice]);
+
+  useEffect(() => {
+    if (!error) return;
+    setToast({
+      id: Date.now(),
+      type: 'error',
+      title: 'Không thể thực hiện',
+      message: error,
+    });
+  }, [error]);
 
   useEffect(() => {
     if (!postImage) {
@@ -301,6 +339,28 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
 
   useEffect(() => { loadGroups(); }, [loadGroups]);
 
+  const loadSavedPosts = useCallback(async () => {
+    if (!currentUser?.id) {
+      setSavedGroupPosts([]);
+      return;
+    }
+    setLoadingSavedPosts(true);
+    try {
+      const response = await fetchSavedCommunityGroupPosts();
+      setSavedGroupPosts(Array.isArray(response?.data) ? response.data : []);
+    } catch {
+      setSavedGroupPosts([]);
+    } finally {
+      setLoadingSavedPosts(false);
+    }
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (groupFilterTab === 'saved') {
+      loadSavedPosts();
+    }
+  }, [groupFilterTab, loadSavedPosts]);
+
   const loadGroup = useCallback(async (groupId, postId = '') => {
     const normalizedGroupId = String(groupId ?? '').trim();
     if (!/^[1-9]\d*$/.test(normalizedGroupId)) {
@@ -310,22 +370,40 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
     setDetailLoading(true);
     setError('');
     try {
-      const [groupResponse, postsResult, membersResult] = await Promise.all([
-        fetchCommunityGroup(normalizedGroupId),
-        fetchCommunityGroupPosts(normalizedGroupId).then((result) => ({ status: 'fulfilled', value: result })).catch((reason) => ({ status: 'rejected', reason })),
-        fetchCommunityGroupMembers(normalizedGroupId).then((result) => ({ status: 'fulfilled', value: result })).catch((reason) => ({ status: 'rejected', reason })),
-      ]);
+      const groupResponse = await fetchCommunityGroup(normalizedGroupId);
       const group = groupResponse.data;
       setSelectedGroup(group);
+      setSettingsForm({
+        name: group.name || '',
+        description: group.description || '',
+        rules: group.rules || '',
+        privacy: group.privacy || 'public',
+        isDiscoverable: group.isDiscoverable !== false,
+        postApprovalMode: group.postApprovalMode || 'manual',
+      });
+      setInGroupPostSearch('');
+      setMemberSearch('');
+      setMemberRoleFilter('all');
       setPostComposerOpen(false);
-      if (postsResult.status === 'fulfilled' && Array.isArray(postsResult.value.data)) {
-        setPosts(postsResult.value.data);
+
+      const canViewContent = group.privacy !== 'private' || group.membershipStatus === 'active' || ['owner', 'admin', 'moderator'].includes(group.currentRole);
+      if (canViewContent) {
+        const [postsResult, membersResult] = await Promise.all([
+          fetchCommunityGroupPosts(normalizedGroupId).then((result) => ({ status: 'fulfilled', value: result })).catch((reason) => ({ status: 'rejected', reason })),
+          fetchCommunityGroupMembers(normalizedGroupId).then((result) => ({ status: 'fulfilled', value: result })).catch((reason) => ({ status: 'rejected', reason })),
+        ]);
+        if (postsResult.status === 'fulfilled' && Array.isArray(postsResult.value.data)) {
+          setPosts(postsResult.value.data);
+        } else {
+          setPosts([]);
+          setError(postsResult.reason?.message || 'Không tải được bài viết của nhóm. Vui lòng thử lại.');
+        }
+        setMembers(membersResult.status === 'fulfilled' && Array.isArray(membersResult.value.data) ? membersResult.value.data : []);
       } else {
         setPosts([]);
-        setError(postsResult.reason?.message || 'Không tải được bài viết của nhóm. Vui lòng thử lại.');
+        setMembers([]);
       }
       setPendingPostScrollId(postId);
-      setMembers(membersResult.status === 'fulfilled' && Array.isArray(membersResult.value.data) ? membersResult.value.data : []);
       setActivePanel('posts');
       setNotice('');
       if (['owner', 'admin', 'moderator'].includes(group.currentRole)) {
@@ -391,6 +469,9 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
         });
       } else if (payload.type === 'GROUP_POST_DELETED' && payload.postId) {
         setPosts((prev) => prev.filter((item) => String(item.id) !== String(payload.postId)));
+      } else if (payload.type === 'GROUP_UPDATED') {
+        loadGroup(selectedGroup.id);
+        loadGroups();
       }
     };
     window.addEventListener('nexussocial:group-realtime', handleGroupRealtime);
@@ -410,6 +491,9 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
       setCreateOpen(false);
       await loadGroups();
       await loadGroup(response.data.id);
+      const createdMsg = `Đã tạo nhóm "${form.name?.trim() || 'mới'}" thành công!`;
+      setToast({ id: Date.now(), type: 'success', title: 'Tạo nhóm thành công', message: createdMsg });
+      setNotice(createdMsg);
     } finally {
       setBusy(false);
     }
@@ -425,6 +509,17 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
       await joinCommunityGroup(group.id);
       await loadGroups();
       await loadGroup(group.id);
+      const isPrivateGroup = group.privacy === 'private';
+      const joinMsg = isPrivateGroup
+        ? `Đã gửi yêu cầu tham gia nhóm "${group.name}". Vui lòng chờ quản trị viên duyệt.`
+        : `Bạn đã tham gia nhóm "${group.name}" thành công!`;
+      setToast({
+        id: Date.now(),
+        type: isPrivateGroup ? 'warning' : 'success',
+        title: isPrivateGroup ? 'Đã gửi yêu cầu tham gia' : 'Tham gia nhóm thành công',
+        message: joinMsg,
+      });
+      setNotice(joinMsg);
     } catch (requestError) {
       setError(requestError.message || 'Không thể tham gia nhóm.');
     } finally {
@@ -434,11 +529,18 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
 
   const handleLeave = async () => {
     if (!selectedGroup) return;
+    const leftGroupName = selectedGroup.name;
     setBusy(true);
     try {
       await leaveCommunityGroup(selectedGroup.id);
       setSelectedGroup(null);
       await loadGroups();
+      setToast({
+        id: Date.now(),
+        type: 'info',
+        title: 'Đã rời khỏi nhóm',
+        message: `Bạn đã rời khỏi nhóm "${leftGroupName}".`,
+      });
     } catch (requestError) {
       setError(requestError.message || 'Không thể rời nhóm.');
     } finally {
@@ -491,11 +593,29 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
       setImageAiPreview(null);
       setPostComposerOpen(false);
       const confirmation = post?.status === 'pending'
-        ? 'Bài viết đang chờ người quản lý nhóm xem xét.'
+        ? 'Đã gửi bài viết thành công! Bài viết đang chờ quản trị viên nhóm xét duyệt.'
         : post?.status === 'rejected'
-          ? `AI đã từ chối bài viết${trustPenalty ? `; điểm uy tín người đăng bị trừ ${trustPenalty} điểm` : ''}.`
-          : `Bài viết đã được đăng${trustPenalty ? `; điểm uy tín người đăng bị trừ ${trustPenalty} điểm` : ''}.`;
+          ? `AI đã từ chối bài viết do vi phạm tiêu chuẩn${trustPenalty ? `; điểm uy tín bị trừ ${trustPenalty} điểm` : ''}.`
+          : `Bài viết đã được đăng lên nhóm thành công${trustPenalty ? `; điểm uy tín bị trừ ${trustPenalty} điểm` : ''}.`;
       await loadGroup(selectedGroup.id);
+      setToast({
+        id: Date.now(),
+        type: post?.status === 'pending' ? 'warning' : post?.status === 'rejected' ? 'error' : 'success',
+        title: post?.status === 'pending'
+          ? 'Đã gửi bài — Đang chờ duyệt'
+          : post?.status === 'rejected'
+            ? 'Bài viết bị AI từ chối'
+            : 'Đăng bài thành công',
+        message: confirmation,
+        duration: post?.status === 'pending' ? 9000 : 7000,
+        ...(post?.status === 'pending' && isReviewer ? {
+          actionLabel: 'Xem hàng chờ duyệt',
+          onAction: () => {
+            setActivePanel('review');
+            setToast(null);
+          },
+        } : {}),
+      });
       setNotice(confirmation);
     } catch (requestError) {
       let cleanupFailed = false;
@@ -522,11 +642,13 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
       const moderatorPenalty = Number(result?.moderatorTrustPenalty || 0);
       const groupName = selectedGroup.name;
       await loadGroup(selectedGroup.id);
-      setNotice(moderatorPenalty
-        ? `Đã duyệt và đăng bài trong nhóm ${groupName}; người đăng và điểm kiểm duyệt riêng của bạn đều bị trừ ${moderatorPenalty} điểm.`
-        : authorPenalty
-          ? `Đã ${decision === 'approved' ? `duyệt và đăng bài trong nhóm ${groupName}` : `từ chối bài trong nhóm ${groupName}`} có vi phạm; người đăng bị trừ ${authorPenalty} điểm. Điểm kiểm duyệt của bạn không bị trừ.`
-          : decision === 'approved' ? `Đã duyệt và đăng bài trong nhóm ${groupName}.` : `Đã từ chối bài viết trong nhóm ${groupName}.`);
+      setNotice(result?.systemBlockedByAi
+        ? `Bài viết vi phạm Bạo lực / Thù ghét nên hệ thống đã tự động ẩn/từ chối theo quy chuẩn trang chủ dù bạn vừa duyệt; người đăng bị trừ ${authorPenalty} điểm${moderatorPenalty ? ` và điểm kiểm duyệt riêng của bạn bị trừ ${moderatorPenalty} điểm` : ''}.`
+        : moderatorPenalty
+          ? `Đã duyệt và đăng bài trong nhóm ${groupName}; người đăng và điểm kiểm duyệt riêng của bạn đều bị trừ ${moderatorPenalty} điểm.`
+          : authorPenalty
+            ? `Đã ${decision === 'approved' ? `duyệt và đăng bài trong nhóm ${groupName}` : `từ chối bài trong nhóm ${groupName}`} có vi phạm; người đăng bị trừ ${authorPenalty} điểm. Điểm kiểm duyệt của bạn không bị trừ.`
+            : decision === 'approved' ? `Đã duyệt và đăng bài trong nhóm ${groupName}.` : `Đã từ chối bài viết trong nhóm ${groupName}.`);
     } catch (requestError) {
       setError(requestError.message || 'Không thể xử lý bài viết.');
     } finally {
@@ -575,7 +697,7 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
         postId: appealTargetPost.id,
         appealReason: appealData.appealReason,
       });
-      setNotice('Đã gửi đơn kháng cáo tới quản trị viên nhóm.');
+      setNotice('Đã gửi đơn khiếu nại tới Quản trị viên hệ thống (Admin tổng) xem xét.');
     } catch (requestError) {
       setError(requestError.message || 'Không thể gửi kháng cáo.');
     }
@@ -627,11 +749,32 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
     setError('');
     try {
       const response = await updateCommunityGroupPrivacy({ groupId: selectedGroup.id, privacy: nextPrivacy });
-      setSelectedGroup((group) => ({ ...group, privacy: response.data?.privacy || nextPrivacy }));
-      setNotice(nextPrivacy === 'private' ? 'Đã đổi nhóm sang chế độ Riêng tư.' : 'Đã đổi nhóm sang chế độ Công khai.');
-      await loadGroups();
+      const updatedPrivacy = response.data?.privacy || nextPrivacy;
+      setSelectedGroup((group) => (group ? { ...group, ...response.data, privacy: updatedPrivacy } : group));
+      await Promise.all([loadGroup(selectedGroup.id), loadGroups()]);
+      setNotice(updatedPrivacy === 'private' ? 'Đã đổi nhóm sang chế độ Riêng tư.' : 'Đã đổi nhóm sang chế độ Công khai.');
     } catch (requestError) {
       setError(requestError.message || 'Không thể đổi quyền riêng tư của nhóm.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveGroupSettings = async (event) => {
+    event.preventDefault();
+    if (!selectedGroup || !isAdmin) return;
+    setBusy(true);
+    setError('');
+    try {
+      const response = await updateCommunityGroupSettings({
+        groupId: selectedGroup.id,
+        ...settingsForm,
+      });
+      setSelectedGroup((group) => (group ? { ...group, ...response.data } : group));
+      await Promise.all([loadGroup(selectedGroup.id), loadGroups()]);
+      setNotice('Đã lưu cài đặt nhóm thành công.');
+    } catch (requestError) {
+      setError(requestError.message || 'Không thể cập nhật cài đặt nhóm.');
     } finally {
       setBusy(false);
     }
@@ -715,12 +858,91 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
   const cooldownDate = cooldownValue ? new Date(cooldownValue) : null;
   const isPostRestricted = currentUser?.status === 'banned'
     || (currentUser?.status === 'cooldown' && (!cooldownDate || cooldownDate > new Date()));
-  const visibleGroups = useMemo(() => groups, [groups]);
+  const visibleGroups = useMemo(() => {
+    if (groupFilterTab === 'joined') {
+      return groups.filter((g) => g.membershipStatus === 'active');
+    }
+    if (groupFilterTab === 'managed') {
+      return groups.filter((g) => ['owner', 'admin', 'moderator'].includes(g.currentRole));
+    }
+    return groups;
+  }, [groups, groupFilterTab]);
+  const approvedPosts = useMemo(() => posts.filter((p) => p.status === 'approved'), [posts]);
+  const pinnedPosts = useMemo(() => approvedPosts.filter((p) => Boolean(p.isPinned)), [approvedPosts]);
+  const filteredApprovedPosts = useMemo(() => {
+    const q = inGroupPostSearch.trim().toLocaleLowerCase();
+    if (!q) return approvedPosts;
+    return approvedPosts.filter((p) => (
+      [p.content, p.authorName, p.username].some((val) => String(val || '').toLocaleLowerCase().includes(q))
+    ));
+  }, [approvedPosts, inGroupPostSearch]);
+  const filteredMembers = useMemo(() => {
+    const q = memberSearch.trim().toLocaleLowerCase();
+    return members.filter((m) => {
+      if (memberRoleFilter === 'staff' && !['owner', 'admin', 'moderator'].includes(m.role)) return false;
+      if (memberRoleFilter === 'member' && m.role !== 'member') return false;
+      if (!q) return true;
+      return [m.name, m.username, roleLabel(m.role)].some((val) => String(val || '').toLocaleLowerCase().includes(q));
+    });
+  }, [members, memberSearch, memberRoleFilter]);
   const moderationPreview = selectGroupModerationPreview(aiPreview, imageAiPreview);
 
   if (detailLoading && !selectedGroup) {
     return <main className="mx-auto min-h-[70vh] w-full max-w-6xl px-4 py-10 text-center text-sm text-slate-500">Đang mở nhóm…</main>;
   }
+
+  const floatingToastNode = toast && typeof document !== 'undefined'
+    ? createPortal(
+      <div
+        role={toast.type === 'error' ? 'alert' : 'status'}
+        className={`fixed top-20 right-4 sm:right-6 z-[130] w-[calc(100vw-2rem)] max-w-md rounded-2xl border p-4 shadow-2xl backdrop-blur-md transition-all animate-fade-in ${
+          toast.type === 'error'
+            ? 'border-rose-200 bg-rose-50/95 text-rose-900 dark:border-rose-800 dark:bg-rose-950/95 dark:text-rose-100'
+            : toast.type === 'warning'
+              ? 'border-amber-200 bg-amber-50/95 text-amber-950 dark:border-amber-800 dark:bg-amber-950/95 dark:text-amber-100'
+              : toast.type === 'info'
+                ? 'border-blue-200 bg-blue-50/95 text-blue-950 dark:border-blue-800 dark:bg-blue-950/95 dark:text-blue-100'
+                : 'border-emerald-200 bg-emerald-50/95 text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950/95 dark:text-emerald-100'
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
+            toast.type === 'error'
+              ? 'bg-rose-100 text-rose-600 dark:bg-rose-900/60 dark:text-rose-300'
+              : toast.type === 'warning'
+                ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/60 dark:text-amber-300'
+                : toast.type === 'info'
+                  ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/60 dark:text-blue-300'
+                  : 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/60 dark:text-emerald-300'
+          }`}>
+            {toast.type === 'error' ? <AlertTriangle size={17} /> : toast.type === 'warning' ? <Clock3 size={17} /> : toast.type === 'info' ? <Info size={17} /> : <CheckCircle2 size={17} />}
+          </div>
+          <div className="min-w-0 flex-1">
+            {toast.title && <p className="text-sm font-bold leading-snug">{toast.title}</p>}
+            <p className="mt-0.5 text-xs leading-relaxed opacity-90">{toast.message}</p>
+            {toast.actionLabel && toast.onAction && (
+              <button
+                type="button"
+                onClick={toast.onAction}
+                className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-amber-700 cursor-pointer"
+              >
+                {toast.actionLabel}
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Đóng thông báo"
+            className="rounded-lg p-1 opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10 cursor-pointer"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      </div>,
+      document.body
+    )
+    : null;
 
   if (selectedGroup) {
     const isMember = selectedGroup.membershipStatus === 'active';
@@ -841,14 +1063,50 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
                 </>
               )}
 
-              {isReviewer && (
-                <div className="mb-5 flex flex-wrap gap-2 border-b border-slate-100 pb-4 dark:border-slate-800">
-                  <button onClick={() => setActivePanel('posts')} className={`rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'posts' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Bài viết</button>
-                  <button onClick={() => setActivePanel('review')} className={`rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'review' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Chờ duyệt <span className="ml-1 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px]">{reviewQueue.length + groupReports.filter((r) => r.status === 'pending').length + groupAppeals.filter((a) => a.status === 'pending').length}</span></button>
-                  {isAdmin && <button onClick={() => setActivePanel('requests')} className={`rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'requests' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Xin tham gia <span className="ml-1 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px]">{memberRequests.length}</span></button>}
-                  <button onClick={() => setActivePanel('members')} className={`rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'members' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>Thành viên</button>
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4 dark:border-slate-800">
+                <div className="flex flex-wrap gap-1.5">
+                  <button onClick={() => setActivePanel('posts')} className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'posts' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>
+                    <MessageCircle size={15} />Bài viết
+                  </button>
+                  <button onClick={() => setActivePanel('pinned')} className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'pinned' ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>
+                    <Pin size={14} />Đáng chú ý <span className="ml-0.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{pinnedPosts.length}</span>
+                  </button>
+                  {(selectedGroup.privacy !== 'private' || isMember || isReviewer) && (
+                    <button onClick={() => setActivePanel('members')} className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'members' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>
+                      <UsersRound size={15} />Thành viên <span className="ml-0.5 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{members.length || selectedGroup.memberCount || 0}</span>
+                    </button>
+                  )}
+                  <button onClick={() => setActivePanel('about')} className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'about' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>
+                    <Info size={15} />Giới thiệu
+                  </button>
+                  {isReviewer && (
+                    <button onClick={() => setActivePanel('review')} className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'review' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>
+                      <ShieldCheck size={15} />Chờ duyệt <span className="ml-1 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{reviewQueue.length + groupReports.filter((r) => r.status === 'pending').length}</span>
+                    </button>
+                  )}
+                  {isAdmin && (
+                    <>
+                      <button onClick={() => setActivePanel('requests')} className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'requests' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>
+                        Xin tham gia <span className="ml-1 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{memberRequests.length}</span>
+                      </button>
+                      <button onClick={() => setActivePanel('settings')} className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-semibold ${activePanel === 'settings' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'}`}>
+                        <Settings size={15} />Cài đặt nhóm
+                      </button>
+                    </>
+                  )}
                 </div>
-              )}
+                {activePanel === 'posts' && (selectedGroup.privacy !== 'private' || isMember || isAdmin) && (
+                  <label className="relative block w-full sm:w-60">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      value={inGroupPostSearch}
+                      onChange={(event) => setInGroupPostSearch(event.target.value)}
+                      placeholder="Tìm bài viết trong nhóm…"
+                      className="h-9 w-full rounded-xl border border-slate-200 bg-white pl-8 pr-3 text-xs outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-blue-950"
+                    />
+                  </label>
+                )}
+              </div>
 
               {activePanel === 'review' && isReviewer ? (
                 <div className="space-y-4">
@@ -891,42 +1149,87 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
                   </div>
 
                   <div className="pt-4 border-t border-slate-200 dark:border-slate-800">
-                    <h3 className="mb-3 text-sm font-bold text-slate-900 dark:text-white">Đơn kháng cáo trong nhóm ({groupAppeals.filter((a) => a.status === 'pending').length})</h3>
-                    {groupAppeals.filter((a) => a.status === 'pending').length === 0 ? (
-                      <p className="rounded-2xl border border-dashed border-slate-200 p-4 text-center text-xs text-slate-500 dark:border-slate-800">Không có đơn kháng cáo đang chờ xử lý.</p>
-                    ) : groupAppeals.filter((a) => a.status === 'pending').map((appeal) => (
-                      <article key={appeal.id} className="mb-3 rounded-2xl border border-amber-200 bg-white p-4 dark:border-amber-900/50 dark:bg-slate-900">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <span className="text-xs font-bold text-amber-800 dark:text-amber-300">{appeal.userName} kháng cáo bài viết</span>
-                          <span className="text-[11px] text-slate-500">AI: {aiLabel(appeal.aiLabel)}</span>
-                        </div>
-                        <p className="mt-2 rounded-xl bg-slate-50 p-3 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-200">{appeal.postContent || '[Hình ảnh]'}</p>
-                        <p className="mt-2 text-xs text-amber-900 dark:text-amber-200">Giải trình: {appeal.appealReason}</p>
-                        <div className="mt-3 flex justify-end gap-2">
-                          <button disabled={busy} onClick={() => handleReviewGroupAppeal(appeal.id, 'rejected')} className="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-50">Từ chối</button>
-                          <button disabled={busy} onClick={() => handleReviewGroupAppeal(appeal.id, 'approved')} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700">Chấp nhận & khôi phục</button>
-                        </div>
-                      </article>
-                    ))}
+                    <p className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 p-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
+                      Các đơn khiếu nại bài viết vi phạm được chuyển trực tiếp lên <strong>Quản trị viên hệ thống (Admin tổng)</strong> tại Khu vực kiểm duyệt để đảm bảo tính khách quan.
+                    </p>
                   </div>
                 </div>
               ) : activePanel === 'requests' && isAdmin ? (
                 <div className="space-y-3">
                   {memberRequests.length === 0 ? <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-slate-700">Không có yêu cầu tham gia.</p> : memberRequests.map((member) => (
                     <article key={member.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-                      <div><p className="text-sm font-bold text-slate-900 dark:text-white">{member.name || member.username}</p><p className="mt-1 text-xs text-slate-500">Gửi yêu cầu {displayDate(member.requestedAt)}</p></div>
-                      <div className="flex gap-2"><button disabled={busy} onClick={() => handleReviewMember(member.id, 'rejected')} className="rounded-lg px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-rose-950/40">Từ chối</button><button disabled={busy} onClick={() => handleReviewMember(member.id, 'active')} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-700">Duyệt</button></div>
+                      <button
+                        type="button"
+                        onClick={() => onOpenProfile?.({ id: member.id, name: member.name, username: member.username, avatar: member.avatar })}
+                        className="flex items-center gap-3 text-left group cursor-pointer"
+                      >
+                        <img
+                          src={member.avatar || DEFAULT_AVATAR}
+                          alt={member.name || member.username}
+                          onError={(e) => { e.currentTarget.src = DEFAULT_AVATAR; }}
+                          className="h-11 w-11 rounded-full object-cover ring-1 ring-slate-200 dark:ring-slate-700 group-hover:ring-2 group-hover:ring-blue-400 dark:group-hover:ring-blue-500 transition shrink-0"
+                        />
+                        <div>
+                          <p className="text-sm font-bold text-slate-900 group-hover:text-blue-600 group-hover:underline dark:text-white dark:group-hover:text-blue-400 transition">
+                            {member.name || member.username}
+                          </p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            @{member.username || 'user'} · Gửi yêu cầu {displayDate(member.requestedAt)}
+                          </p>
+                        </div>
+                      </button>
+                      <div className="flex gap-2">
+                        <button disabled={busy} onClick={() => handleReviewMember(member.id, 'rejected')} className="rounded-lg px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-rose-950/40 cursor-pointer">Từ chối</button>
+                        <button disabled={busy} onClick={() => handleReviewMember(member.id, 'active')} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-700 cursor-pointer">Duyệt</button>
+                      </div>
                     </article>
                   ))}
                 </div>
-              ) : activePanel === 'members' && isReviewer ? (
-                <div className="space-y-2">
-                  {members.map((member) => (
-                    <article key={member.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-800">
-                      <div>
-                        <p className="text-sm font-semibold text-slate-900 dark:text-white">{member.name || member.username}</p>
-                        <p className="mt-1 text-xs text-slate-500">{roleLabel(member.role)}</p>
-                      </div>
+              ) : activePanel === 'members' && (selectedGroup.privacy !== 'private' || isMember || isReviewer) ? (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      {[
+                        { id: 'all', label: `Tất cả (${members.length})` },
+                        { id: 'staff', label: `Ban quản trị (${members.filter((m) => ['owner', 'admin', 'moderator'].includes(m.role)).length})` },
+                        { id: 'member', label: `Thành viên (${members.filter((m) => m.role === 'member').length})` },
+                      ].map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setMemberRoleFilter(tab.id)}
+                          className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${memberRoleFilter === tab.id ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300'}`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="relative block w-full sm:w-56">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        value={memberSearch}
+                        onChange={(event) => setMemberSearch(event.target.value)}
+                        placeholder="Tìm thành viên theo tên…"
+                        className="h-9 w-full rounded-xl border border-slate-200 bg-white pl-8 pr-3 text-xs outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900"
+                      />
+                    </label>
+                  </div>
+
+                  {filteredMembers.length === 0 ? (
+                    <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-slate-700">Không tìm thấy thành viên phù hợp.</p>
+                  ) : filteredMembers.map((member) => (
+                    <article key={member.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
+                      <button
+                        type="button"
+                        onClick={() => onOpenProfile?.({ id: member.id, name: member.name, username: member.username, avatar: member.avatar })}
+                        className="flex items-center gap-3 text-left group cursor-pointer"
+                      >
+                        <img src={member.avatar || DEFAULT_AVATAR} alt={member.name || member.username} onError={(e) => { e.currentTarget.src = DEFAULT_AVATAR; }} className="h-10 w-10 rounded-full object-cover ring-1 ring-slate-200 dark:ring-slate-700 group-hover:ring-2 group-hover:ring-blue-400 dark:group-hover:ring-blue-500 transition shrink-0" />
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900 group-hover:text-blue-600 group-hover:underline dark:text-white dark:group-hover:text-blue-400 transition">{member.name || member.username}</p>
+                          <p className="mt-0.5 text-xs text-slate-500">@{member.username || 'member'} · {roleLabel(member.role)}</p>
+                        </div>
+                      </button>
                       <div className="flex items-center gap-2">
                         {selectedGroup.currentRole === 'owner' && member.role !== 'owner' && (
                           <select
@@ -952,6 +1255,150 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
                         )}
                       </div>
                     </article>
+                  ))}
+                </div>
+              ) : activePanel === 'about' ? (
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white">Giới thiệu về cộng đồng này</h3>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-600 dark:text-slate-300">
+                      {selectedGroup.description || 'Chưa có mô tả chi tiết cho nhóm này.'}
+                    </p>
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                      <div className="flex items-start gap-3 rounded-xl bg-slate-50 p-3.5 dark:bg-slate-800/60">
+                        {selectedGroup.privacy === 'private' ? <LockKeyhole size={18} className="mt-0.5 text-violet-600" /> : <Globe2 size={18} className="mt-0.5 text-emerald-600" />}
+                        <div>
+                          <p className="text-xs font-bold text-slate-900 dark:text-white">{selectedGroup.privacy === 'private' ? 'Nhóm Riêng tư' : 'Nhóm Công khai'}</p>
+                          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                            {selectedGroup.privacy === 'private' ? 'Chỉ thành viên đã được duyệt mới có thể xem bài viết và danh sách thành viên.' : 'Bất kỳ ai cũng có thể xem thành viên và những gì họ đăng trong nhóm.'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-start gap-3 rounded-xl bg-slate-50 p-3.5 dark:bg-slate-800/60">
+                        <Calendar size={18} className="mt-0.5 text-blue-600" />
+                        <div>
+                          <p className="text-xs font-bold text-slate-900 dark:text-white">Lịch sử & Hoạt động</p>
+                          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                            Ngày tạo: {displayDate(selectedGroup.createdAt)} · {approvedPosts.length} bài thảo luận đã duyệt
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                    <h3 className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-white"><BookOpen size={17} className="text-blue-600" />Nội quy & Tiêu chuẩn nhóm</h3>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-600 dark:text-slate-300">
+                      {selectedGroup.rules || 'Quản trị viên chưa thêm quy tắc riêng. Mọi bài viết và bình luận đều được bảo vệ bởi hệ thống kiểm duyệt AI đa phương thức của WINGS.'}
+                    </p>
+                  </div>
+                </div>
+              ) : activePanel === 'settings' && isAdmin ? (
+                <form onSubmit={handleSaveGroupSettings} className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white">Cài đặt & Chỉnh sửa thông tin nhóm</h3>
+                    <p className="mt-1 text-xs text-slate-500">Cập nhật tên nhóm, mô tả, nội quy, quyền riêng tư và chế độ kiểm duyệt AI.</p>
+                  </div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-200">
+                    Tên nhóm
+                    <input
+                      required
+                      maxLength={100}
+                      value={settingsForm.name}
+                      onChange={(event) => setSettingsForm((prev) => ({ ...prev, name: event.target.value }))}
+                      className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950"
+                    />
+                  </label>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-200">
+                    Mô tả nhóm
+                    <textarea
+                      rows={3}
+                      maxLength={1000}
+                      value={settingsForm.description}
+                      onChange={(event) => setSettingsForm((prev) => ({ ...prev, description: event.target.value }))}
+                      className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950"
+                    />
+                  </label>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-200">
+                    Nội quy nhóm
+                    <textarea
+                      rows={4}
+                      maxLength={3000}
+                      value={settingsForm.rules}
+                      onChange={(event) => setSettingsForm((prev) => ({ ...prev, rules: event.target.value }))}
+                      className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950"
+                    />
+                  </label>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-200">
+                      Quyền riêng tư
+                      <select
+                        value={settingsForm.privacy}
+                        onChange={(event) => setSettingsForm((prev) => ({ ...prev, privacy: event.target.value }))}
+                        className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-950"
+                      >
+                        <option value="public">Công khai 🌐</option>
+                        <option value="private">Riêng tư 🔒</option>
+                      </select>
+                    </label>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-200">
+                      Chế độ duyệt bài viết
+                      <select
+                        value={settingsForm.postApprovalMode}
+                        onChange={(event) => setSettingsForm((prev) => ({ ...prev, postApprovalMode: event.target.value }))}
+                        className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-950"
+                      >
+                        <option value="manual">Quản trị viên duyệt thủ công</option>
+                        <option value="automatic">AI tự động duyệt bài an toàn</option>
+                      </select>
+                    </label>
+                  </div>
+                  {settingsForm.privacy === 'private' && (
+                    <label className="flex items-center gap-2.5 text-xs font-medium text-slate-600 dark:text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={settingsForm.isDiscoverable}
+                        onChange={(event) => setSettingsForm((prev) => ({ ...prev, isDiscoverable: event.target.checked }))}
+                        className="accent-blue-600"
+                      />
+                      Cho phép mọi người tìm thấy nhóm trong danh sách Khám phá
+                    </label>
+                  )}
+                  <div className="flex justify-end pt-2">
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white transition hover:bg-blue-700 disabled:opacity-60"
+                    >
+                      {busy ? 'Đang lưu…' : 'Lưu thay đổi'}
+                    </button>
+                  </div>
+                </form>
+              ) : activePanel === 'pinned' ? (
+                <div className="space-y-4">
+                  {pinnedPosts.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-slate-300 px-5 py-10 text-center dark:border-slate-700">
+                      <Pin className="mx-auto text-slate-400" size={24} />
+                      <p className="mt-3 text-sm font-semibold text-slate-700 dark:text-slate-200">Chưa có bài viết nào được ghim</p>
+                      <p className="mt-1 text-xs text-slate-500">Ban quản trị có thể ghim nội quy hoặc thông báo quan trọng từ menu ⋯ trên từng bài viết.</p>
+                    </div>
+                  ) : pinnedPosts.map((post) => (
+                    <GroupPostCard
+                      key={post.id}
+                      post={post}
+                      currentUser={currentUser}
+                      canInteract={isMember}
+                      currentGroupRole={selectedGroup.currentRole}
+                      onRequireAuth={onRequireAuth}
+                      onOpenProfile={onOpenProfile}
+                      onPostUpdated={(updated) => {
+                        setPosts((prev) => prev.map((item) => (String(item.id) === String(updated.id) ? { ...item, ...updated } : item)));
+                        loadGroup(selectedGroup.id);
+                      }}
+                      onPostDeleted={(deletedId) => {
+                        setPosts((prev) => prev.filter((item) => String(item.id) !== String(deletedId)));
+                      }}
+                      onAppealSubmitted={() => loadGroup(selectedGroup.id)}
+                    />
                   ))}
                 </div>
               ) : selectedGroup.privacy === 'private' && !isMember && !isAdmin ? (
@@ -980,14 +1427,14 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
               ) : (
                 <div className="space-y-4">
                   {detailLoading && <p className="py-6 text-center text-sm text-slate-500">Đang cập nhật…</p>}
-                  {!detailLoading && posts.filter((p) => p.status === 'approved').length === 0 && (
+                  {!detailLoading && filteredApprovedPosts.length === 0 && (
                     <div className="rounded-2xl border border-dashed border-slate-300 px-5 py-10 text-center dark:border-slate-700">
                       <BookOpen className="mx-auto text-slate-400" size={25} />
-                      <p className="mt-3 text-sm font-semibold text-slate-700 dark:text-slate-200">Chưa có bài viết nào</p>
+                      <p className="mt-3 text-sm font-semibold text-slate-700 dark:text-slate-200">{inGroupPostSearch.trim() ? 'Không tìm thấy bài viết phù hợp' : 'Chưa có bài viết nào'}</p>
                       <p className="mt-1 text-xs text-slate-500">Bài viết đã được duyệt sẽ hiển thị tại đây.</p>
                     </div>
                   )}
-                  {posts.filter((post) => post.status === 'approved').map((post) => (
+                  {filteredApprovedPosts.map((post) => (
                     <GroupPostCard
                       key={post.id}
                       post={post}
@@ -1003,6 +1450,7 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
                       onPostDeleted={(deletedId) => {
                         setPosts((prev) => prev.filter((item) => String(item.id) !== String(deletedId)));
                       }}
+                      onAppealSubmitted={() => loadGroup(selectedGroup.id)}
                     />
                   ))}
                 </div>
@@ -1040,6 +1488,7 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
           onClose={() => setAppealTargetPost(null)}
           onSubmitAppeal={handleSubmitRejectedPostAppeal}
         />
+        {floatingToastNode}
       </main>
     );
   }
@@ -1061,15 +1510,68 @@ export default function CommunityGroupsView({ currentUser, onRequireAuth, onOpen
 
       {error && <div role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300">{error}</div>}
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <div><h2 className="text-lg font-black text-slate-900 dark:text-white">Khám phá nhóm</h2><p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Nhóm riêng tư chỉ hiện bài viết với thành viên được duyệt.</p></div>
+        <div className="flex flex-wrap items-center gap-2">
+          {[
+            { id: 'all', label: `Khám phá (${groups.length})` },
+            ...(currentUser ? [
+              { id: 'joined', label: `Nhóm của tôi (${groups.filter((g) => g.membershipStatus === 'active').length})` },
+              { id: 'managed', label: `Nhóm tôi quản lý (${groups.filter((g) => ['owner', 'admin', 'moderator'].includes(g.currentRole)).length})` },
+              { id: 'saved', label: 'Bài viết đã lưu', Icon: Bookmark },
+            ] : []),
+          ].map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setGroupFilterTab(id)}
+              className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-xs font-bold transition ${groupFilterTab === id ? 'bg-blue-600 text-white shadow-sm' : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200'}`}
+            >
+              {Icon && <Icon size={13} />}
+              {label}
+            </button>
+          ))}
+        </div>
         <label className="relative block w-full sm:max-w-xs"><Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Tìm theo tên hoặc mô tả" className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 dark:border-slate-800 dark:bg-slate-900 dark:focus:ring-blue-950" /></label>
       </div>
-      {loading ? <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{[0, 1, 2].map((item) => <div key={item} className="h-56 animate-pulse rounded-2xl bg-slate-200 dark:bg-slate-800" />)}</div> : visibleGroups.length ? (
+      {groupFilterTab === 'saved' ? (
+        loadingSavedPosts ? (
+          <div className="space-y-4">{[0, 1].map((item) => <div key={item} className="h-44 animate-pulse rounded-2xl bg-slate-200 dark:bg-slate-800" />)}</div>
+        ) : savedGroupPosts.length > 0 ? (
+          <div className="space-y-4">
+            {savedGroupPosts.map((post) => (
+              <GroupPostCard
+                key={post.id}
+                post={post}
+                showGroup
+                currentUser={currentUser}
+                canInteract={Boolean(post.canInteract)}
+                onRequireAuth={onRequireAuth}
+                onOpenProfile={onOpenProfile}
+                onOpenGroup={(targetGroupId, targetPostId) => loadGroup(targetGroupId, targetPostId)}
+                onToggleSave={(savedState) => {
+                  if (!savedState) {
+                    setSavedGroupPosts((prev) => prev.filter((item) => String(item.id) !== String(post.id)));
+                  }
+                }}
+                onPostDeleted={(deletedId) => {
+                  setSavedGroupPosts((prev) => prev.filter((item) => String(item.id) !== String(deletedId)));
+                }}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-3xl border border-dashed border-slate-300 bg-white px-5 py-14 text-center dark:border-slate-700 dark:bg-slate-900">
+            <Bookmark className="mx-auto text-slate-400" size={28} />
+            <p className="mt-3 font-bold text-slate-800 dark:text-slate-100">Chưa có bài viết nhóm nào được lưu</p>
+            <p className="mt-1 text-sm text-slate-500">Bạn có thể đánh dấu lưu các bài thảo luận hay trong nhóm để đọc lại tại đây.</p>
+          </div>
+        )
+      ) : loading ? <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{[0, 1, 2].map((item) => <div key={item} className="h-56 animate-pulse rounded-2xl bg-slate-200 dark:bg-slate-800" />)}</div> : visibleGroups.length ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{visibleGroups.map((group) => <GroupCard key={group.id} group={group} onOpen={handleOpenGroup} onJoin={handleJoin} isJoining={joiningId === group.id} />)}</div>
       ) : (
         <div className="rounded-3xl border border-dashed border-slate-300 bg-white px-5 py-14 text-center dark:border-slate-700 dark:bg-slate-900"><UsersRound className="mx-auto text-slate-400" size={28} /><p className="mt-3 font-bold text-slate-800 dark:text-slate-100">Chưa tìm thấy nhóm phù hợp</p><p className="mt-1 text-sm text-slate-500">Hãy thử từ khóa khác hoặc tạo một cộng đồng mới.</p></div>
       )}
       {createOpen && <CreateGroupDialog onClose={() => setCreateOpen(false)} onCreate={handleCreateGroup} busy={busy} />}
+      {floatingToastNode}
     </main>
   );
 }

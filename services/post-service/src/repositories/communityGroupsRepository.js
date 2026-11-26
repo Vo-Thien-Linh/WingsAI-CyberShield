@@ -17,6 +17,20 @@ async function inTransaction(pool, work) {
   }
 }
 
+let groupPinColumnsEnsured = false;
+async function ensureGroupPinColumns(pool) {
+  if (groupPinColumnsEnsured || !pool || typeof pool.query !== 'function') return;
+  try {
+    await pool.query(`
+      ALTER TABLE community_group_posts ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE community_group_posts ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
+    `);
+    groupPinColumnsEnsured = true;
+  } catch {
+    // silently continue if mock pool
+  }
+}
+
 async function notifyGroupPostPenalty(pool, { userId, amount, groupId, postId, label }) {
   if (typeof pool.query !== 'function') return;
   try {
@@ -47,6 +61,14 @@ const groupSelect = `
 `;
 
 export function createCommunityGroupsRepository({ pool }) {
+  const NOT_HARD_HIDDEN_POST_SQL = `(
+    COALESCE(p.ai_label, '') NOT IN ('Violence', 'Hate Speech')
+    AND COALESCE(p.image_moderation->>'decision', '') <> 'rejected'
+    AND NOT (
+      COALESCE(p.image_moderation->>'decision', '') = 'pending_review'
+      AND COALESCE(p.image_moderation->>'confidenceLabel', '') = 'Bạo lực'
+    )
+  )`;
   return {
     async listGroups({ viewerId = null, search = '' } = {}) {
       const result = await pool.query(
@@ -84,11 +106,13 @@ export function createCommunityGroupsRepository({ pool }) {
                        GROUP BY r.reaction_type) summary) AS "reactionCounts",
                 (SELECT r.reaction_type FROM community_group_post_reactions r WHERE r.post_id = p.id AND r.user_id = $1) AS "myReaction",
                 (SELECT COUNT(*)::int FROM community_group_post_comments c WHERE c.post_id = p.id) AS "commentsCount",
-                (SELECT COUNT(*)::int FROM community_group_post_shares s WHERE s.post_id = p.id) AS "sharesCount"
+                (SELECT COUNT(*)::int FROM community_group_post_shares s WHERE s.post_id = p.id) AS "sharesCount",
+                (SELECT a.status FROM community_group_appeals a WHERE a.post_id = p.id AND a.user_id = p.author_id ORDER BY a.created_at DESC LIMIT 1) AS "appealStatus"
          FROM community_group_posts p
          JOIN community_groups g ON g.id = p.group_id
          JOIN users u ON u.id = p.author_id
          WHERE p.review_status = 'approved'
+           AND (${NOT_HARD_HIDDEN_POST_SQL} OR ($1 IS NOT NULL AND p.author_id = $1))
            AND (
              ($1 IS NOT NULL AND EXISTS (
                SELECT 1 FROM community_group_members membership
@@ -269,7 +293,7 @@ export function createCommunityGroupsRepository({ pool }) {
     async listMemberRequests(groupId) {
       const result = await pool.query(
         `SELECT gm.user_id AS id, u.full_name AS name, u.username, u.avatar_url AS avatar,
-                gm.requested_at AS "requestedAt"
+                u.is_verified AS "isVerified", gm.requested_at AS "requestedAt"
          FROM community_group_members gm
          JOIN users u ON u.id = gm.user_id
          WHERE gm.group_id = $1 AND gm.status = 'pending'
@@ -297,6 +321,7 @@ export function createCommunityGroupsRepository({ pool }) {
     },
 
     async listPosts({ groupId, viewerId, includePending }) {
+      await ensureGroupPinColumns(pool);
       const result = await pool.query(
         `SELECT p.id::text AS id, p.group_id::text AS "groupId", p.author_id AS "authorId",
                 u.full_name AS "authorName", u.username, u.avatar_url AS "authorAvatar",
@@ -306,6 +331,8 @@ export function createCommunityGroupsRepository({ pool }) {
                 p.ai_confidence AS "aiConfidence", p.ai_action AS "aiAction", p.ai_source AS "aiSource",
                 p.review_note AS "reviewNote", p.reviewed_at AS "reviewedAt",
                 p.edited_at AS "editedAt", p.created_at AS "createdAt",
+                COALESCE(p.is_pinned, FALSE) AS "isPinned",
+                p.pinned_at AS "pinnedAt",
                 ($2::uuid IS NOT NULL AND EXISTS (
                   SELECT 1 FROM saved_group_posts sp
                   WHERE sp.post_id = p.id AND sp.user_id = $2
@@ -317,12 +344,14 @@ export function createCommunityGroupsRepository({ pool }) {
                        GROUP BY r.reaction_type) summary) AS "reactionCounts",
                 (SELECT r.reaction_type FROM community_group_post_reactions r WHERE r.post_id = p.id AND r.user_id = $2) AS "myReaction",
                 (SELECT COUNT(*)::int FROM community_group_post_comments c WHERE c.post_id = p.id) AS "commentsCount",
-                (SELECT COUNT(*)::int FROM community_group_post_shares s WHERE s.post_id = p.id) AS "sharesCount"
+                (SELECT COUNT(*)::int FROM community_group_post_shares s WHERE s.post_id = p.id) AS "sharesCount",
+                (SELECT a.status FROM community_group_appeals a WHERE a.post_id = p.id AND a.user_id = p.author_id ORDER BY a.created_at DESC LIMIT 1) AS "appealStatus"
          FROM community_group_posts p
          JOIN users u ON u.id = p.author_id
          WHERE p.group_id = $1
            AND p.review_status = 'approved'
-         ORDER BY p.created_at DESC`,
+           AND (${NOT_HARD_HIDDEN_POST_SQL} OR ($2::uuid IS NOT NULL AND p.author_id = $2))
+         ORDER BY COALESCE(p.is_pinned, FALSE) DESC, p.pinned_at DESC NULLS LAST, p.created_at DESC`,
         [groupId, viewerId]
       );
       return result.rows;
@@ -345,8 +374,9 @@ export function createCommunityGroupsRepository({ pool }) {
     async findApprovedPost({ groupId, postId }) {
       const result = await pool.query(
         `SELECT id::text AS id, group_id::text AS "groupId"
-         FROM community_group_posts
-         WHERE group_id = $1 AND id = $2 AND review_status = 'approved'`,
+         FROM community_group_posts p
+         WHERE group_id = $1 AND id = $2 AND review_status = 'approved'
+           AND ${NOT_HARD_HIDDEN_POST_SQL}`,
         [groupId, postId]
       );
       return result.rows[0] || null;
@@ -667,6 +697,7 @@ export function createCommunityGroupsRepository({ pool }) {
     async findPostForReview({ groupId, postId }) {
       const result = await pool.query(
         `SELECT id::text AS id, author_id AS "authorId", ai_label AS "aiLabel",
+                ai_confidence AS "aiConfidence",
                 image_moderation AS "imageModeration",
                 review_status AS status
          FROM community_group_posts
@@ -676,7 +707,7 @@ export function createCommunityGroupsRepository({ pool }) {
       return result.rows[0] || null;
     },
 
-    async reviewPost({ groupId, postId, reviewerId, decision, reason, authorTrustPenalty, moderatorTrustPenalty }) {
+    async reviewPost({ groupId, postId, reviewerId, decision, reason, authorTrustPenalty, moderatorTrustPenalty, applyCooldownMinutes = 0 }) {
       const reviewed = await inTransaction(pool, async (db) => {
         const result = await db.query(
           `UPDATE community_group_posts p
@@ -731,6 +762,16 @@ export function createCommunityGroupsRepository({ pool }) {
             moderatorTrustScoreAfter = Number(updated.rows[0]?.score ?? previousScore);
             moderatorTrustScoreChange = moderatorTrustScoreAfter - previousScore;
           }
+        }
+        if (applyCooldownMinutes > 0) {
+          const cooldownUntil = new Date(Date.now() + applyCooldownMinutes * 60 * 1000).toISOString();
+          await db.query(
+            `UPDATE users
+             SET status = 'cooldown', cooldown_until = $1, cooldown_reason = 'Vi phạm bạo lực trong bài viết nhóm',
+                 cooldown_violation_text = $2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $3`,
+            [cooldownUntil, post.content || '[Hình ảnh bạo lực]', post.authorId]
+          );
         }
         await db.query(
           `INSERT INTO community_group_moderation_logs
@@ -1062,7 +1103,18 @@ export function createCommunityGroupsRepository({ pool }) {
         if (decision === 'approved') {
           await db.query(
             `UPDATE community_group_posts
-             SET review_status = 'approved', review_note = $3, reviewed_by = $4, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             SET review_status = 'approved',
+                 ai_label = 'Normal',
+                 ai_action = 'allow',
+                 image_moderation = CASE
+                   WHEN image_moderation IS NOT NULL
+                     THEN jsonb_set(jsonb_set(image_moderation, '{decision}', '"safe"', true), '{confidenceLabel}', '"An toàn"', true)
+                   ELSE NULL
+                 END,
+                 review_note = $3,
+                 reviewed_by = $4,
+                 reviewed_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
              WHERE group_id = $1 AND id = $2`,
             [groupId, appeal.postId, adminNotes || 'Đã chấp nhận khiếu nại và khôi phục bài viết.', reviewerId]
           );
@@ -1107,18 +1159,89 @@ export function createCommunityGroupsRepository({ pool }) {
     },
 
     async updateGroupPrivacy({ groupId, privacy, actorId }) {
+      return inTransaction(pool, async (db) => {
+        const result = await db.query(
+          `UPDATE community_groups g
+           SET privacy = $2::varchar,
+               is_discoverable = CASE WHEN $2::varchar = 'public' THEN TRUE ELSE g.is_discoverable END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE g.id = $1
+             AND EXISTS (
+               SELECT 1 FROM community_group_members actor
+               WHERE actor.group_id = $1 AND actor.user_id = $3
+                 AND actor.status = 'active'
+                 AND actor.role IN ('owner', 'admin')
+             )
+           RETURNING g.id::text AS id, g.name, g.privacy, g.is_discoverable AS "isDiscoverable"`,
+          [groupId, privacy, actorId]
+        );
+        const updated = result.rows[0] || null;
+        if (updated && privacy === 'public') {
+          await db.query(
+            `UPDATE community_group_members
+             SET status = 'active', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = $2
+             WHERE group_id = $1 AND status = 'pending'`,
+            [groupId, actorId]
+          );
+        }
+        return updated;
+      });
+    },
+
+    async updateGroupSettings({ groupId, name, description, rules, privacy, isDiscoverable, postApprovalMode, actorId }) {
+      return inTransaction(pool, async (db) => {
+        const result = await db.query(
+          `UPDATE community_groups g
+           SET name = $2::varchar,
+               description = $3::text,
+               rules = $4::text,
+               privacy = $5::varchar,
+               is_discoverable = CASE WHEN $5::varchar = 'public' THEN TRUE ELSE $6::boolean END,
+               post_approval_mode = $7::varchar,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE g.id = $1
+             AND EXISTS (
+               SELECT 1 FROM community_group_members actor
+               WHERE actor.group_id = $1 AND actor.user_id = $8
+                 AND actor.status = 'active'
+                 AND actor.role IN ('owner', 'admin')
+             )
+           RETURNING g.id::text AS id, g.name, g.description, g.rules, g.privacy,
+                     g.is_discoverable AS "isDiscoverable", g.post_approval_mode AS "postApprovalMode"`,
+          [groupId, name, description, rules, privacy, Boolean(isDiscoverable), postApprovalMode, actorId]
+        );
+        const updated = result.rows[0] || null;
+        if (updated && privacy === 'public') {
+          await db.query(
+            `UPDATE community_group_members
+             SET status = 'active', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = $2
+             WHERE group_id = $1 AND status = 'pending'`,
+            [groupId, actorId]
+          );
+        }
+        return updated;
+      });
+    },
+
+    async setPostPinned({ groupId, postId, isPinned, actorId }) {
+      await ensureGroupPinColumns(pool);
       const result = await pool.query(
-        `UPDATE community_groups g
-         SET privacy = $2, updated_at = CURRENT_TIMESTAMP
-         WHERE g.id = $1
+        `UPDATE community_group_posts p
+         SET is_pinned = $3::boolean,
+             pinned_at = CASE WHEN $3::boolean = TRUE THEN CURRENT_TIMESTAMP ELSE NULL END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE p.group_id = $1
+           AND p.id = $2
+           AND p.review_status = 'approved'
            AND EXISTS (
              SELECT 1 FROM community_group_members actor
-             WHERE actor.group_id = $1 AND actor.user_id = $3
+             WHERE actor.group_id = $1 AND actor.user_id = $4
                AND actor.status = 'active'
-               AND actor.role IN ('owner', 'admin')
+               AND actor.role IN ('owner', 'admin', 'moderator')
            )
-         RETURNING g.id::text AS id, g.name, g.privacy`,
-        [groupId, privacy, actorId]
+         RETURNING p.id::text AS id, p.group_id::text AS "groupId",
+                   p.is_pinned AS "isPinned", p.pinned_at AS "pinnedAt"`,
+        [groupId, postId, Boolean(isPinned), actorId]
       );
       return result.rows[0] || null;
     },

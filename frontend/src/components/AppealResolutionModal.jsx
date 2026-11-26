@@ -136,7 +136,11 @@ export default function AppealResolutionModal({
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
-                    {appeal.contentType === 'comment' ? 'Bình luận' : 'Bài viết'}
+                    {appeal.contentType === 'comment'
+                    ? 'Bình luận'
+                    : appeal.contentType === 'group_post'
+                      ? `Bài viết nhóm${appeal.groupName ? ` · ${appeal.groupName}` : ''}`
+                      : 'Bài viết'}
                   </span>
                   <span className="text-[11px] text-slate-400">{appeal.createdAt || 'Gần đây'}</span>
                 </div>
@@ -419,7 +423,11 @@ export default function AppealResolutionModal({
               <div className="flex justify-between pb-1.5 border-b border-slate-200">
                 <span className="text-slate-500">Đối tượng:</span>
                 <span className="font-semibold text-slate-900">
-                  {appeal.contentType === 'comment' ? 'Bình luận' : 'Bài viết'} #{appeal.contentId} của {appeal.user?.name}
+                  {appeal.contentType === 'comment'
+                    ? 'Bình luận'
+                    : appeal.contentType === 'group_post'
+                      ? `Bài viết nhóm${appeal.groupName ? ` · ${appeal.groupName}` : ''}`
+                      : 'Bài viết'} #{appeal.contentId} của {appeal.user?.name}
                 </span>
               </div>
               <div className="flex justify-between pb-1.5 border-b border-slate-200">
