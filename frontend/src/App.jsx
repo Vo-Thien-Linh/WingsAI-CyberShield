@@ -100,6 +100,8 @@ export default function App() {
     }
   }); // Bộ đếm xoay vòng đề xuất bài viết bảng tin (lưu session để F5 giữ nguyên bài)
   const [hasVisitedMessages, setHasVisitedMessages] = useState(false);
+  const [hasVisitedGroups, setHasVisitedGroups] = useState(false);
+  const [previousProfileTab, setPreviousProfileTab] = useState('home');
   const createdPostIdsRef = useRef(new Set());
   const pendingCommentKeysRef = useRef(new Set());
   const [openPostMenuId, setOpenPostMenuId] = useState(null);
@@ -560,6 +562,12 @@ export default function App() {
     }
   }, [currentUser]);
 
+  useEffect(() => {
+    if (activeTab === 'groups') {
+      setHasVisitedGroups(true);
+    }
+  }, [activeTab]);
+
   // Xử lý Chuyển Tab có Auth Guard và Role Guard
   const handleTabChange = (tab, targetUser = null, replace = false, subTab = 'all') => {
     if (tab === 'offline' || tab === '404' || tab === 'error') {
@@ -595,8 +603,12 @@ export default function App() {
     }
 
     if (effectiveTab === 'profile') {
+      if (activeTab !== 'profile') {
+        setPreviousProfileTab(activeTab || 'home');
+      }
       setViewedProfileUser(targetUser || null);
       setProfileInitialTab(subTab || 'all');
+      window.scrollTo({ top: 0, behavior: 'instant' });
     } else {
       setViewedProfileUser(null);
       setProfileInitialTab('all');
@@ -1233,6 +1245,21 @@ export default function App() {
     }));
   };
 
+  // Ghim / Bỏ ghim bài viết trên trang cá nhân
+  const handleTogglePinPost = (postId, nextPinned, nextPinnedAt = null) => {
+    setPosts((previous) => previous.map((post) => {
+      if (String(post.id) === String(postId)) {
+        return {
+          ...post,
+          isPinned: nextPinned,
+          is_pinned: nextPinned,
+          pinnedAt: nextPinned ? (nextPinnedAt || new Date().toISOString()) : null,
+        };
+      }
+      return post;
+    }));
+  };
+
   // Thêm bình luận vào bài viết (Lưu trực tiếp vào Supabase)
   const handleAddComment = async (postId, newComment, options = {}) => {
     if (!currentUser) {
@@ -1430,11 +1457,23 @@ export default function App() {
       if (isAllClean) {
         // Chuyển về trạng thái bình thường: Khôi phục hiển thị & bỏ ẩn
         if (report && report.targetType === 'post') {
-          setPosts(prev => prev.map(p => (String(p.id) === String(report.targetId) || `post-${p.id}` === String(report.targetId)) ? { ...p, isHidden: false, isSoftHidden: false, ai_status: 'approved', ai_label: 'Normal', image_moderation_status: 'approved', image_moderation_label: 'safe' } : p));
+          setPosts(prev => prev.map(p => (String(p.id) === String(report.targetId) || `post-${p.id}` === String(report.targetId)) ? {
+            ...p,
+            isHidden: false,
+            is_hidden: false,
+            isSoftHidden: false,
+            ai_status: 'approved',
+            moderationStatus: 'approved',
+            ai_label: 'Normal',
+            aiStatus: { label: 'Normal', confidence: 0.99, status: 'approved' },
+            image_moderation_status: (p.image || p.image_url) ? 'safe' : null,
+            image_moderation_label: (p.image || p.image_url) ? 'safe' : null,
+            imageModeration: (p.image || p.image_url) ? { ...(p.imageModeration || {}), status: 'safe', label: 'safe' } : null,
+          } : p));
         } else if (report && report.targetType === 'comment') {
           setPosts(prev => prev.map(p => ({
             ...p,
-            comments: (p.comments || []).map(c => (String(c.id) === String(report.targetId) || String(c._id) === String(report.targetId)) ? { ...c, isHidden: false, is_hidden: false, isSoftHidden: false, ai_status: 'approved', ai_label: 'Normal', image_moderation_status: 'approved', image_moderation_label: 'safe' } : c)
+            comments: (p.comments || []).map(c => (String(c.id) === String(report.targetId) || String(c._id) === String(report.targetId)) ? { ...c, isHidden: false, is_hidden: false, isSoftHidden: false, ai_status: 'approved', ai_label: 'Normal', image_moderation_status: (c.image || c.image_url) ? 'safe' : null, image_moderation_label: (c.image || c.image_url) ? 'safe' : null } : c)
           })));
         }
 
@@ -1458,12 +1497,23 @@ export default function App() {
         const dbImgLabel = newImageLabel === 'Clean' ? 'safe' : (newImageLabel ? newImageLabel.toLowerCase() : undefined);
 
         if (report && report.targetType === 'post') {
+          const isPostHardHidden = newLabel === 'Hate Speech' || isViolence;
+          const nextAiStatus = isPostHardHidden ? 'hidden' : 'approved';
           setPosts(prev => prev.map(p => (String(p.id) === String(report.targetId) || `post-${p.id}` === String(report.targetId)) ? {
             ...p,
-            isHidden: true,
-            ai_status: 'hidden',
+            isHidden: isPostHardHidden,
+            is_hidden: isPostHardHidden,
+            isSoftHidden: !isPostHardHidden && (newLabel === 'Toxic' || newImageLabel === 'NSFW'),
+            ...(isPostHardHidden ? { isPinned: false, is_pinned: false, pinnedAt: null } : {}),
+            ai_status: nextAiStatus,
+            moderationStatus: nextAiStatus,
             ai_label: newLabel,
-            ...(newImageLabel ? { image_moderation_status: dbImgStatus, image_moderation_label: dbImgLabel } : {})
+            aiStatus: { label: newLabel, confidence: 0.99, status: nextAiStatus },
+            ...(newImageLabel ? {
+              image_moderation_status: dbImgStatus,
+              image_moderation_label: dbImgLabel,
+              imageModeration: { ...(p.imageModeration || {}), status: dbImgStatus, label: dbImgLabel },
+            } : {})
           } : p));
         } else if (report && report.targetType === 'comment') {
           const isCommentViolence = newLabel === 'Violence' || newImageLabel === 'Violence';
@@ -1763,21 +1813,30 @@ export default function App() {
     // Nếu chấp thuận khiếu nại (Approved):
     if (status === 'approved') {
       const isNormal = newLabel === 'Normal';
-      const isHidden = !isNormal;
+      const isPostHardHidden = ['Violence', 'Hate Speech'].includes(newLabel);
+      const isPostSoftHidden = newLabel === 'Toxic';
 
       // 1. Phục hồi bài viết hoặc bình luận
       if (appeal.contentType === 'comment') {
+        const isCommentHardHidden = ['Violence', 'Hate Speech'].includes(newLabel);
+        const isCommentSoftHidden = newLabel === 'Toxic';
         setPosts(prev => prev.map(p => {
           const updatedComments = (p.comments || []).map(c => {
             if (String(c.id) === String(appeal.contentId) || String(c._id) === String(appeal.contentId)) {
               return {
                 ...c,
-                isHidden,
-                is_hidden: isHidden,
-                isSoftHidden: isHidden,
+                isHidden: isCommentHardHidden,
+                is_hidden: isCommentHardHidden,
+                isSoftHidden: isCommentSoftHidden,
+                is_soft_hidden: isCommentSoftHidden,
                 ai_label: newLabel,
-                ai_status: isNormal ? 'approved' : 'hidden',
-                aiStatus: { label: newLabel, confidence: 0.99 },
+                ai_status: isCommentHardHidden ? 'hidden' : 'approved',
+                aiStatus: { label: newLabel, confidence: 0.99, status: isCommentHardHidden ? 'hidden' : 'approved' },
+                ...(isNormal ? {
+                  image_moderation_status: (c.image || c.image_url) ? 'safe' : null,
+                  image_moderation_label: (c.image || c.image_url) ? 'safe' : null,
+                  imageModeration: (c.image || c.image_url) ? { ...(c.imageModeration || {}), status: 'safe', label: 'safe' } : null,
+                } : {}),
                 appeal: { ...c.appeal, status: 'approved' }
               };
             }
@@ -1788,14 +1847,22 @@ export default function App() {
       } else {
         setPosts(prev => prev.map(p => {
           if (String(p.id) === String(appeal.contentId) || `post-${p.id}` === String(appeal.contentId)) {
+            const nextAiStatus = isPostHardHidden ? 'hidden' : 'approved';
             return {
               ...p,
-              isHidden,
-              is_hidden: isHidden,
-              isSoftHidden: isHidden,
+              isHidden: isPostHardHidden,
+              is_hidden: isPostHardHidden,
+              isSoftHidden: isPostSoftHidden,
+              ...(isPostHardHidden ? { isPinned: false, is_pinned: false, pinnedAt: null } : {}),
               ai_label: newLabel,
-              ai_status: isNormal ? 'approved' : 'hidden',
-              aiStatus: { label: newLabel, confidence: 0.99 },
+              ai_status: nextAiStatus,
+              moderationStatus: nextAiStatus,
+              aiStatus: { label: newLabel, confidence: 0.99, status: nextAiStatus },
+              ...(isNormal ? {
+                image_moderation_status: (p.image || p.image_url) ? 'safe' : null,
+                image_moderation_label: (p.image || p.image_url) ? 'safe' : null,
+                imageModeration: (p.image || p.image_url) ? { ...(p.imageModeration || {}), status: 'safe', label: 'safe' } : null,
+              } : {}),
               appeal: { ...p.appeal, status: 'approved' }
             };
           }
@@ -2195,14 +2262,16 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'groups' && (
-          <CommunityGroupsView
-            currentUser={currentUser}
-            onRequireAuth={handleRequireAuth}
-            onOpenProfile={handleOpenUserProfile}
-            initialGroupRequest={groupOpenRequest}
-            onInitialGroupOpened={clearGroupOpenRequest}
-          />
+        {(activeTab === 'groups' || hasVisitedGroups) && (
+          <div className={activeTab === 'groups' ? '' : 'hidden'}>
+            <CommunityGroupsView
+              currentUser={currentUser}
+              onRequireAuth={handleRequireAuth}
+              onOpenProfile={handleOpenUserProfile}
+              initialGroupRequest={groupOpenRequest}
+              onInitialGroupOpened={clearGroupOpenRequest}
+            />
+          </div>
         )}
 
         {/* Tab 3: Tin nhắn (Hỗ trợ báo cáo tin nhắn, giữ DOM để chuyển tab tức thì 0s) */}
@@ -2249,6 +2318,7 @@ export default function App() {
             currentUser={currentUser}
             viewedUser={viewedProfileUser}
             posts={posts.filter(p => !isDeletedNoticePost(p))}
+            onBack={() => handleTabChange(previousProfileTab || 'home')}
             onAddPost={handleAddPost}
             onToggleLike={handleToggleLike}
             onAddComment={handleAddComment}
@@ -2278,6 +2348,7 @@ export default function App() {
             onOpenStoryViewer={handleOpenStoryViewer}
             initialTab={profileInitialTab}
             onToggleSave={handleToggleSavePost}
+            onTogglePin={handleTogglePinPost}
             onOpenLiveStream={handleOpenLiveStreamAction}
           />
         )}

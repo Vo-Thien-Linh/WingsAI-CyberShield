@@ -34,7 +34,12 @@ export function createReportsController({ reportRepository, postRepository }) {
         if (postRepository && ['post', 'comment'].includes(targetType)) {
           let visiblePostId = targetId;
           if (targetType === 'comment') {
-            const parent = await postRepository.pool.query('SELECT post_id FROM comments WHERE id = $1', [targetId]);
+            const parent = await postRepository.pool.query('SELECT post_id, author_id FROM comments WHERE id = $1', [targetId]);
+            if (parent.rows[0]?.author_id && String(parent.rows[0].author_id) === String(reporterId)) {
+              const error = new Error('Bạn không thể tự báo cáo bình luận của chính mình');
+              error.statusCode = 400;
+              throw error;
+            }
             visiblePostId = parent.rows[0]?.post_id;
           }
           const visiblePost = visiblePostId
@@ -43,6 +48,11 @@ export function createReportsController({ reportRepository, postRepository }) {
           if (!visiblePost) {
             const error = new Error('\u0042\u00e0i vi\u1ebft kh\u00f4ng t\u1ed3n t\u1ea1i');
             error.statusCode = 404;
+            throw error;
+          }
+          if (targetType === 'post' && String(visiblePost.author_id) === String(reporterId)) {
+            const error = new Error('Bạn không thể tự báo cáo bài viết của chính mình');
+            error.statusCode = 400;
             throw error;
           }
         }

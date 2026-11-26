@@ -27,6 +27,11 @@ export function createUsersRouter({ pool }) {
   router.patch('/:userId/verification', requireRole('admin'), usersController.updateVerification);
 
   /**
+   * Quản trị viên tinh chỉnh điểm uy tín cho người dùng
+   */
+  router.patch('/:userId/trust-score', requireRole('admin'), usersController.updateTrustScore);
+
+  /**
    * Áp dụng hoặc gỡ bỏ xử phạt người dùng (ban / unban / clear_cooldown)
    */
   router.post('/:userId/sanction', requireRole('moderator'), usersController.updateSanction);

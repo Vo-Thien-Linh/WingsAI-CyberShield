@@ -133,3 +133,60 @@ test('postsController toggleSavePost and getSavedPosts', async () => {
   assert.equal(resJson.data[0].id, '101');
   assert.equal(resJson.data[0].isSaved, true);
 });
+
+test('togglePinPost pins normal posts and blocks pinning hard-hidden violation posts', async () => {
+  const { createPostService } = await import('../src/services/postService.js');
+  const postsDb = new Map([
+    ['10', { id: 10, author_id: 'u1', content: 'Clean post', ai_status: 'approved', image_moderation_status: 'safe', is_pinned: false }],
+    ['11', { id: 11, author_id: 'u1', content: 'Violent post', ai_status: 'hidden', ai_label: 'Violence', image_moderation_status: 'safe', is_pinned: false }],
+    ['12', { id: 12, author_id: 'u1', content: 'Rejected image post', ai_status: 'approved', image_moderation_status: 'rejected_admin', is_pinned: false }],
+    ['13', { id: 13, author_id: 'u2', content: 'Other user post', ai_status: 'approved', image_moderation_status: 'safe', is_pinned: false }],
+  ]);
+
+  const mockRepo = {
+    async findByIdForOwnerAction(postId) {
+      return postsDb.get(String(postId)) || null;
+    },
+    async setPostPinned({ postId, authorId, isPinned }) {
+      const post = postsDb.get(String(postId));
+      if (!post || post.author_id !== authorId) return null;
+      if (isPinned && (post.ai_status === 'hidden' || ['pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final'].includes(post.image_moderation_status))) {
+        return null;
+      }
+      post.is_pinned = Boolean(isPinned);
+      post.pinned_at = isPinned ? '2026-11-25T12:00:00.000Z' : null;
+      return { ...post };
+    },
+  };
+
+  const postService = createPostService({ postRepository: mockRepo, moderationHook: {} });
+
+  // 1. Tác giả ghim bài viết hợp lệ
+  const pinned = await postService.togglePinPost({ user: { id: 'u1' }, postId: '10', isPinned: true });
+  assert.equal(pinned.is_pinned, true);
+  assert.ok(pinned.pinned_at);
+  assert.equal(mapPostToResponse(pinned, 'u1').isPinned, true);
+
+  // 2. Chặn ghim bài viết bị ẩn cứng do vi phạm ngôn từ (Violence / Hate Speech)
+  await assert.rejects(
+    () => postService.togglePinPost({ user: { id: 'u1' }, postId: '11', isPinned: true }),
+    (err) => err.statusCode === 409 && /Không thể ghim bài viết đang bị ẩn/.test(err.message)
+  );
+
+  // 3. Chặn ghim bài viết bị ẩn cứng do vi phạm hình ảnh
+  await assert.rejects(
+    () => postService.togglePinPost({ user: { id: 'u1' }, postId: '12', isPinned: true }),
+    (err) => err.statusCode === 409
+  );
+
+  // 4. Chặn người khác ghim bài trên trang cá nhân không phải của họ
+  await assert.rejects(
+    () => postService.togglePinPost({ user: { id: 'u1' }, postId: '13', isPinned: true }),
+    (err) => err.statusCode === 403
+  );
+
+  // 5. Nếu bài đã ghim sau đó bị ẩn cứng, mapPostToResponse tự động coi isPinned = false
+  const laterHidden = { ...pinned, ai_status: 'hidden', is_pinned: true };
+  assert.equal(mapPostToResponse(laterHidden, 'u1').isPinned, false);
+});
+

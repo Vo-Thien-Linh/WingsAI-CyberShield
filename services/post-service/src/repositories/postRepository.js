@@ -22,6 +22,20 @@ async function ensureSavedPostsTable(pool) {
   }
 }
 
+let postPinColumnsEnsured = false;
+async function ensurePostPinColumns(pool) {
+  if (postPinColumnsEnsured || !pool || typeof pool.query !== 'function') return;
+  postPinColumnsEnsured = true;
+  try {
+    await pool.query(`
+      ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE posts ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ DEFAULT NULL;
+    `);
+  } catch {
+    // Column already exists or mocked pool in tests
+  }
+}
+
 export const postSelect = `
   SELECT
     p.id,
@@ -46,6 +60,8 @@ export const postSelect = `
     p.updated_at,
     p.edited_at,
     p.original_post_id,
+    p.is_pinned,
+    p.pinned_at,
     u.username,
     u.full_name,
     u.avatar_url,
@@ -455,10 +471,13 @@ export function createPostRepository({ pool }) {
         );
       }
 
+      const shouldAutoUnpin = aiStatus === 'hidden' || ['pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final'].includes(imageModeration?.decision);
+      const pinResetFields = shouldAutoUnpin ? `, is_pinned = FALSE, pinned_at = NULL` : '';
+
       const result = await runPostTransaction(pool, async (db) => {
         const updateResult = await db.query(
           `UPDATE posts
-         SET content = $3, image_url = $4${moderationFields}${aiFields}, edited_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         SET content = $3, image_url = $4${moderationFields}${aiFields}${pinResetFields}, edited_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
          WHERE id = $1 AND author_id = $2
            AND COALESCE(image_moderation_status, '') NOT IN ('pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final')
          RETURNING id`,
@@ -527,12 +546,45 @@ export function createPostRepository({ pool }) {
       const cleanId = Number(String(commentId).replace(/^cmt-/, ''));
       if (!Number.isInteger(cleanId) || cleanId <= 0) return null;
       const result = await pool.query(
-        `SELECT id, post_id, parent_id, author_id, is_hidden, ai_status
+        `SELECT id, post_id, parent_id, author_id, content, image_url, is_hidden, ai_status, ai_label, image_moderation_status
          FROM comments
          WHERE id = $1`,
         [cleanId]
       );
       return result.rows[0] || null;
+    },
+
+    async updateComment({ postId, commentId, authorId, content, aiLabel = 'Normal', aiConfidence = 1.0, isHidden = false, isSoftHidden = false, aiStatus = 'approved' }) {
+      const cleanPostId = Number(String(postId).replace(/^post-/, ''));
+      const cleanCommentId = Number(String(commentId).replace(/^cmt-/, ''));
+      if (!Number.isInteger(cleanPostId) || !Number.isInteger(cleanCommentId)) return null;
+
+      const updated = await pool.query(
+        `UPDATE comments
+         SET content = $4,
+             ai_label = $5,
+             ai_confidence = $6,
+             is_hidden = $7,
+             is_soft_hidden = $8,
+             ai_status = $9
+         WHERE id = $1 AND post_id = $2 AND author_id = $3
+         RETURNING id`,
+        [cleanCommentId, cleanPostId, authorId, content || '', aiLabel, aiConfidence, Boolean(isHidden), Boolean(isSoftHidden), aiStatus]
+      );
+      if (!updated.rows[0]) return null;
+
+      const detail = await pool.query(
+        `SELECT c.id, c.post_id, c.parent_id, c.content, c.image_url, c.image_label,
+                c.image_moderation_status, c.image_moderation_safe, c.image_moderation_nsfw,
+                c.image_moderation_violence, c.image_moderation_thresholds, c.image_moderation_appealed_at,
+                c.created_at, c.is_hidden, c.is_soft_hidden, c.ai_label, c.ai_status,
+                u.id AS author_id, u.full_name, u.username, u.avatar_url, u.is_verified
+         FROM comments c
+         JOIN users u ON u.id = c.author_id
+         WHERE c.id = $1`,
+        [cleanCommentId]
+      );
+      return detail.rows[0] || null;
     },
 
     async createComment({ postId, authorId, parentId = null, content, imageUrl = null, imageModeration = null, aiLabel = 'Normal', aiConfidence = 1.0, isHidden = false, isSoftHidden = false, aiStatus = 'approved' }) {
@@ -880,6 +932,42 @@ export function createPostRepository({ pool }) {
       }
 
       return posts;
+    },
+
+    async setPostPinned({ postId, authorId, isPinned }) {
+      const cleanId = Number(String(postId).replace(/^post-/, ''));
+      if (Number.isNaN(cleanId) || cleanId <= 0) {
+        const error = new Error('ID bài viết không hợp lệ');
+        error.statusCode = 400;
+        throw error;
+      }
+
+      await ensurePostPinColumns(pool);
+
+      const pinnedVal = Boolean(isPinned);
+      const result = await pool.query(
+        `UPDATE posts
+         SET is_pinned = $3::boolean,
+             pinned_at = CASE WHEN $3::boolean = TRUE THEN CURRENT_TIMESTAMP ELSE NULL END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+           AND author_id = $2
+           AND (
+             $3::boolean = FALSE
+             OR (
+               COALESCE(ai_status, 'approved') != 'hidden'
+               AND COALESCE(image_moderation_status, '') NOT IN ('pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final')
+             )
+           )
+         RETURNING id, is_pinned, pinned_at`,
+        [cleanId, authorId, pinnedVal]
+      );
+
+      if (!result.rows[0]) {
+        return null;
+      }
+
+      return this.findById(result.rows[0].id, authorId);
     },
   };
 }

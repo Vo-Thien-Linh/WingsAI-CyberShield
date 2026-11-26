@@ -212,6 +212,51 @@ export function createUsersController({ userRepository, pool }) {
     },
 
     /**
+     * PATCH /api/users/:userId/trust-score
+     * Quản trị viên tinh chỉnh điểm uy tín cho người dùng (0 - 100)
+     */
+    async updateTrustScore(req, res, next) {
+      try {
+        const { userId } = req.params;
+        const { trustScore, reason } = req.body || {};
+
+        const numericScore = Number(trustScore);
+        if (trustScore === undefined || trustScore === null || trustScore === '' || !Number.isFinite(numericScore) || numericScore < 0 || numericScore > 100) {
+          return res.status(400).json({
+            success: false,
+            message: 'Điểm uy tín phải là số từ 0 đến 100.',
+          });
+        }
+
+        const updatedUser = await userRepository.updateTrustScore({
+          targetUserId: userId,
+          trustScore: Math.round(numericScore),
+          reason,
+          actorId: req.user?.id || null,
+        });
+
+        const finalScore = Number(updatedUser.trust_score ?? Math.round(numericScore));
+        res.json({
+          success: true,
+          message: `Đã cập nhật điểm uy tín thành ${finalScore}/100.`,
+          data: {
+            id: updatedUser.id,
+            username: updatedUser.username,
+            name: updatedUser.full_name,
+            email: updatedUser.email,
+            role: updatedUser.role,
+            status: updatedUser.status,
+            trustScore: finalScore,
+            trustTier: getTrustTier(finalScore),
+            changeAmount: updatedUser.change_amount ?? 0,
+          },
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+
+    /**
      * POST /api/users/:userId/sanction
      * Xử phạt tài khoản (ban, unban, clear_cooldown)
      */
@@ -384,9 +429,16 @@ export function createUsersController({ userRepository, pool }) {
             isLiked: p.my_reaction != null,
             myReaction: p.my_reaction || null,
             reactionCounts: p.reaction_counts || {},
+            isSaved: Boolean(p.isSaved || p.is_saved),
+            isPinned: Boolean(p.is_pinned || p.isPinned) && p.ai_status !== 'hidden' && !['pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final'].includes(p.image_moderation_status),
+            pinnedAt: (Boolean(p.is_pinned || p.isPinned) && p.ai_status !== 'hidden') ? (p.pinned_at || p.pinnedAt || null) : null,
+            ai_status: p.ai_status || 'approved',
+            ai_label: p.ai_label || 'Normal',
+            moderationStatus: p.ai_status || 'approved',
             aiStatus: {
               label: p.ai_label || 'Normal',
               confidence: parseFloat(p.ai_confidence) || 0.99,
+              status: p.ai_status || 'approved',
             },
             aiStatusValue: p.ai_status || 'approved',
             comments: (p.comments || []).map((c) => ({

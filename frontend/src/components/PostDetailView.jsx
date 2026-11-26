@@ -32,6 +32,10 @@ export default function PostDetailView({
   const [isLoading, setIsLoading] = useState(!initialPost && Boolean(postId));
   const [errorMessage, setErrorMessage] = useState('');
 
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }, [postId]);
+
   // Nếu chưa có dữ liệu bài viết (bài viết cũ hoặc điều hướng trực tiếp), tải từ API
   useEffect(() => {
     if (initialPost) {
@@ -235,36 +239,48 @@ export default function PostDetailView({
         <div className="space-y-6">
           {/* Thẻ bài viết chính được hiển thị tiêu điểm với đầy đủ tính năng */}
           <div className="relative">
-            <PostCard
-              key={post.id}
-              post={post}
-              currentUser={currentUser}
-              allPosts={allPosts}
-              onUpdatePost={onUpdatePost}
-              onToggleLike={onToggleLike}
-              onAddComment={onAddComment}
-              onOpenReportModal={onOpenReportModal}
-              onOpenAppealModal={onOpenAppealModal}
-              onRequireAuth={onRequireAuth}
-              onRequireLogin={onRequireLogin}
-              onOpenProfile={onOpenProfile}
-              onEditPost={onEditPost}
-              onDeletePost={onDeletePost}
-              openPostMenuId={openPostMenuId}
-              onTogglePostMenu={onTogglePostMenu}
-              onClosePostMenu={onClosePostMenu}
-              onDismissNotice={onDismissNotice}
-              onSharePost={onSharePost}
-              onToggleSave={onToggleSave}
-              isTargeted={meta?.type === 'comment'}
-              targetType={meta?.type}
-              targetActor={meta?.actor}
-              targetCommentId={meta?.targetCommentId}
-            />
+            {post.imageModeration?.status === 'rejected_final' ? (
+              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-rose-200 dark:border-rose-900/40 p-6 text-center shadow-xs space-y-2">
+                <ShieldAlert className="w-8 h-8 text-rose-500 mx-auto" />
+                <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                  Bài viết đã bị gỡ bỏ
+                </h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                  Nội dung này đã bị xóa khỏi hệ thống sau quyết định kiểm duyệt cuối cùng do vi phạm Tiêu chuẩn cộng đồng.
+                </p>
+              </div>
+            ) : (
+              <PostCard
+                key={post.id}
+                post={post}
+                currentUser={currentUser}
+                allPosts={allPosts}
+                onUpdatePost={onUpdatePost}
+                onToggleLike={onToggleLike}
+                onAddComment={onAddComment}
+                onOpenReportModal={onOpenReportModal}
+                onOpenAppealModal={onOpenAppealModal}
+                onRequireAuth={onRequireAuth}
+                onRequireLogin={onRequireLogin}
+                onOpenProfile={onOpenProfile}
+                onEditPost={onEditPost}
+                onDeletePost={onDeletePost}
+                openPostMenuId={openPostMenuId}
+                onTogglePostMenu={onTogglePostMenu}
+                onClosePostMenu={onClosePostMenu}
+                onDismissNotice={onDismissNotice}
+                onSharePost={onSharePost}
+                onToggleSave={onToggleSave}
+                isTargeted={meta?.type === 'comment'}
+                targetType={meta?.type}
+                targetActor={meta?.actor}
+                targetCommentId={meta?.targetCommentId}
+              />
+            )}
           </div>
 
           {/* ================= KHU VỰC BÀI VIẾT LIÊN QUAN & GỢI Ý ================= */}
-          {relatedPosts.length > 0 && (
+          {relatedPosts.length > 0 && post.imageModeration?.status !== 'rejected_final' && (
             <div className="pt-4 border-t border-slate-200/80 dark:border-slate-800/80 space-y-4">
               <div className="flex items-center justify-between px-1">
                 <div className="flex items-center gap-2.5">

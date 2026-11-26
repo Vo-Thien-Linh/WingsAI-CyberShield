@@ -60,3 +60,44 @@ test('updateVerification: throws 404 when user not found', async () => {
     }
   );
 });
+
+test('updateTrustScore: adjusts score, records trust log, and notifies user', async () => {
+  const queries = [];
+  const mockPool = {
+    async query(sql, params) {
+      queries.push({ sql, params });
+      if (sql.includes('UPDATE users')) {
+        return {
+          rows: [{
+            id: params[1],
+            username: 'wings_user',
+            full_name: 'Wings User',
+            email: 'wings@example.com',
+            role: 'user',
+            status: 'active',
+            is_verified: false,
+            trust_score: params[0],
+          }],
+        };
+      }
+      return { rows: [] };
+    },
+  };
+
+  const userRepo = createUserRepository({ pool: mockPool });
+  userRepo.findById = async (id) => ({ id, username: 'wings_user', trust_score: 70 });
+
+  const result = await userRepo.updateTrustScore({
+    targetUserId: 'user-123',
+    trustScore: 95,
+    reason: 'Đóng góp tích cực cho cộng đồng',
+    actorId: 'admin-1',
+  });
+
+  assert.equal(result.trust_score, 95);
+  assert.equal(result.old_score, 70);
+  assert.equal(result.change_amount, 25);
+  assert.ok(queries.some((q) => q.sql.includes('INSERT INTO user_trust_logs') && q.params[1] === 25 && q.params[2] === 95));
+  assert.ok(queries.some((q) => q.sql.includes('INSERT INTO notifications') && q.params[0] === 'user-123'));
+});
+

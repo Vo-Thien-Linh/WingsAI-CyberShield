@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   X, ShieldAlert, AlertTriangle, Send, CheckCircle2, 
   MessageSquare, FileText, Image as ImageIcon, ShieldCheck, Lock 
@@ -103,8 +104,8 @@ export default function ReportModal({ isOpen, onClose, target, currentUser, onSu
 
   const badge = getTargetTypeBadge(target.targetType);
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+  const modalContent = (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
       <div className="w-full max-w-lg bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]">
         
         {/* Header */}
@@ -330,4 +331,6 @@ export default function ReportModal({ isOpen, onClose, target, currentUser, onSu
       </div>
     </div>
   );
+
+  return typeof document !== 'undefined' ? createPortal(modalContent, document.body) : modalContent;
 }

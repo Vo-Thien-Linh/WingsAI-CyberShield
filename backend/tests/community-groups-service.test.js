@@ -13,6 +13,7 @@ function createHarness({ aiResult = { label: 'Normal', confidence: 0.98, action:
   const memberships = new Map([
     ['1:owner', { role: 'owner', status: 'active' }],
     ['1:admin', { role: 'admin', status: 'active' }],
+    ['1:moderator', { role: 'moderator', status: 'active' }],
     ['1:member', { role: 'member', status: 'active' }],
     ['2:owner', { role: 'owner', status: 'active' }],
     ['2:member', { role: 'member', status: 'active' }],
@@ -39,6 +40,22 @@ function createHarness({ aiResult = { label: 'Normal', confidence: 0.98, action:
       if (!group || !['owner', 'admin'].includes(membership?.role) || membership.status !== 'active') return null;
       group.postApprovalMode = postApprovalMode;
       return { id: group.id, postApprovalMode };
+    },
+    async updateGroupSettings({ groupId, name, description, rules, privacy, isDiscoverable, postApprovalMode, actorId }) {
+      const group = groups.get(String(groupId));
+      const membership = memberships.get(`${groupId}:${actorId}`);
+      if (!group || !['owner', 'admin'].includes(membership?.role) || membership.status !== 'active') return null;
+      group.name = name;
+      group.description = description;
+      group.rules = rules;
+      group.privacy = privacy;
+      group.isDiscoverable = isDiscoverable;
+      group.postApprovalMode = postApprovalMode;
+      return { ...group };
+    },
+    async setPostPinned({ groupId, postId, isPinned }) {
+      if (String(groupId) !== '1' || String(postId) !== '42') return null;
+      return { id: '42', groupId: '1', isPinned: Boolean(isPinned), pinnedAt: isPinned ? '2026-11-25T00:00:00.000Z' : null };
     },
     async findMembership(groupId, userId) { return memberships.get(`${groupId}:${userId}`) || null; },
     async upsertMembership(input) {
@@ -231,7 +248,8 @@ test('group image posts persist EfficientNet label and confidence and require re
     imageUrl: 'https://res.cloudinary.com/demo/image/upload/test.jpg',
   });
 
-  assert.equal(post.status, 'pending');
+  assert.equal(post.status, 'approved');
+  assert.equal(calls.createdPosts[0].authorTrustPenalty, 10);
   assert.equal(calls.createdPosts[0].imageModeration.label, 'sensitive');
   assert.equal(calls.createdPosts[0].imageModeration.confidence, 0.78);
   assert.equal(calls.createdPosts[0].imageModeration.source, 'efficientnet-b1');
@@ -347,24 +365,28 @@ test('a successful group post consumes its cleanup ticket without deleting the i
   assert.equal(verifyCloudinaryCleanupTicket({ ticket: imageCleanupToken, userId: 'member', imageUrl, secret: 'test-secret' }), null);
 });
 
-test('automatic mode sends flagged or low-confidence posts to human review', async () => {
+test('automatic mode handles member posts automatically by AI label without requiring manual admin approval', async () => {
   const { service: flaggedService, calls: flaggedCalls } = createHarness({ aiResult: { label: 'Violence', confidence: 0.96, action: 'hide' } });
   await flaggedService.updatePostApprovalMode({ groupId: '1', user: user('owner'), postApprovalMode: 'automatic' });
-  const flagged = await flaggedService.createPost({ groupId: '1', user: user('member'), content: 'Nội dung cần xem xét' });
+  const flagged = await flaggedService.createPost({ groupId: '1', user: user('member'), content: 'Nội dung bạo lực' });
 
-  const { service: uncertainService, calls: uncertainCalls } = createHarness({ aiResult: { label: 'Normal', confidence: 0.65, action: 'allow' } });
-  await uncertainService.updatePostApprovalMode({ groupId: '1', user: user('owner'), postApprovalMode: 'automatic' });
-  const uncertain = await uncertainService.createPost({ groupId: '1', user: user('member'), content: 'Nội dung chưa chắc chắn' });
+  const { service: normalService, calls: normalCalls } = createHarness({ aiResult: { label: 'Normal', confidence: 0.65, action: 'allow' } });
+  await normalService.updatePostApprovalMode({ groupId: '1', user: user('owner'), postApprovalMode: 'automatic' });
+  const normal = await normalService.createPost({ groupId: '1', user: user('member'), content: 'Nội dung bình thường' });
 
-  const { service: inconsistentService } = createHarness({ aiResult: { label: 'Toxic', confidence: 0.99, action: 'allow' } });
-  await inconsistentService.updatePostApprovalMode({ groupId: '1', user: user('owner'), postApprovalMode: 'automatic' });
-  const inconsistent = await inconsistentService.createPost({ groupId: '1', user: user('member'), content: 'Kết quả AI không nhất quán' });
+  const { service: toxicService, calls: toxicCalls } = createHarness({ aiResult: { label: 'Toxic', confidence: 0.99, action: 'warn' } });
+  await toxicService.updatePostApprovalMode({ groupId: '1', user: user('owner'), postApprovalMode: 'automatic' });
+  const toxic = await toxicService.createPost({ groupId: '1', user: user('member'), content: 'Nội dung hơi độc hại' });
 
-  assert.equal(flagged.status, 'pending');
-  assert.equal(flaggedCalls.createdPosts[0].reviewStatus, 'pending');
-  assert.equal(uncertain.status, 'pending');
-  assert.equal(uncertainCalls.createdPosts[0].reviewStatus, 'pending');
-  assert.equal(inconsistent.status, 'pending');
+  assert.equal(flagged.status, 'rejected');
+  assert.equal(flaggedCalls.createdPosts[0].reviewStatus, 'rejected');
+  assert.equal(flaggedCalls.createdPosts[0].authorTrustPenalty, 35);
+  assert.equal(normal.status, 'approved');
+  assert.equal(normalCalls.createdPosts[0].reviewStatus, 'approved');
+  assert.equal(normalCalls.createdPosts[0].authorTrustPenalty, 0);
+  assert.equal(toxic.status, 'approved');
+  assert.equal(toxicCalls.createdPosts[0].reviewStatus, 'approved');
+  assert.equal(toxicCalls.createdPosts[0].authorTrustPenalty, 5);
 });
 
 test('group admins publish directly and carry only author penalties for their own violations', async () => {
@@ -382,10 +404,14 @@ test('group admins publish directly and carry only author penalties for their ow
   assert.equal(safeCalls.createdPosts[0].reviewStatus, 'approved');
 });
 
-test('approving a flagged member post deducts author trust and separate group moderator trust', async () => {
+test('approving a flagged Violence/Hate Speech member post applies home-feed blocking and deducts both author and moderator trust', async () => {
   const { service, calls } = createHarness();
-  await service.reviewPost({ groupId: '1', postId: '10', user: user('admin'), decision: 'approved' });
+  const result = await service.reviewPost({ groupId: '1', postId: '10', user: user('admin'), decision: 'approved' });
 
+  assert.equal(result.status, 'rejected');
+  assert.equal(result.systemBlockedByAi, true);
+  assert.equal(calls.reviewedPosts[0].decision, 'rejected');
+  assert.equal(calls.reviewedPosts[0].applyCooldownMinutes, 10);
   assert.equal(calls.reviewedPosts[0].authorTrustPenalty, 35);
   assert.equal(calls.reviewedPosts[0].moderatorTrustPenalty, 35);
 });
@@ -433,7 +459,8 @@ test('only an admin of the same group can review a post', async () => {
   );
   const result = await service.reviewPost({ groupId: '1', postId: '10', user: user('admin'), decision: 'approved' });
 
-  assert.equal(result.status, 'approved');
+  assert.equal(result.status, 'rejected');
+  assert.equal(result.systemBlockedByAi, true);
   assert.equal(calls.reviewedPosts.length, 1);
 });
 
@@ -640,3 +667,55 @@ test('manual approval records separate member and moderator deductions in the sa
   assert.deepEqual(auditLog.params.slice(5), [-35, -35, 65]);
   assert.ok(pool.calls.some((call) => call.sql === 'COMMIT'));
 });
+
+test('group admins can update full group settings while members are forbidden', async () => {
+  const { service } = createHarness();
+  const updated = await service.updateGroupSettings({
+    groupId: '1',
+    user: user('admin'),
+    name: '  Cộng đồng nâng cấp  ',
+    description: '  Mô tả mới  ',
+    rules: '  Nội quy mới  ',
+    privacy: 'private',
+    isDiscoverable: false,
+    postApprovalMode: 'automatic',
+  });
+
+  assert.equal(updated.name, 'Cộng đồng nâng cấp');
+  assert.equal(updated.description, 'Mô tả mới');
+  assert.equal(updated.rules, 'Nội quy mới');
+  assert.equal(updated.privacy, 'private');
+  assert.equal(updated.isDiscoverable, false);
+  assert.equal(updated.postApprovalMode, 'automatic');
+
+  await assert.rejects(
+    service.updateGroupSettings({ groupId: '1', user: user('member'), name: 'Thử đổi tên' }),
+    (error) => error.statusCode === 403
+  );
+  await assert.rejects(
+    service.updateGroupSettings({ groupId: '1', user: user('admin'), name: '   ' }),
+    (error) => error.statusCode === 400
+  );
+});
+
+test('group moderators and admins can pin and unpin approved group posts while regular members cannot', async () => {
+  const { service } = createHarness();
+
+  const pinned = await service.togglePinPost({ groupId: '1', postId: '42', user: user('moderator'), isPinned: true });
+  assert.equal(pinned.isPinned, true);
+  assert.ok(pinned.pinnedAt);
+
+  const unpinned = await service.togglePinPost({ groupId: '1', postId: '42', user: user('admin'), isPinned: false });
+  assert.equal(unpinned.isPinned, false);
+  assert.equal(unpinned.pinnedAt, null);
+
+  await assert.rejects(
+    service.togglePinPost({ groupId: '1', postId: '42', user: user('member'), isPinned: true }),
+    (error) => error.statusCode === 403
+  );
+  await assert.rejects(
+    service.togglePinPost({ groupId: '1', postId: '999', user: user('admin'), isPinned: true }),
+    (error) => error.statusCode === 404
+  );
+});
+

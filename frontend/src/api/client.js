@@ -7,7 +7,7 @@ async function request(path, options = {}) {
   // Tự động bổ sung x-user-id từ phiên đăng nhập nếu chưa có trong headers
   let autoUserHeader = {};
   try {
-    const rawUser = localStorage.getItem('nexussocial_user');
+    const rawUser = localStorage.getItem('nexussocial_current_user') || localStorage.getItem('nexussocial_user');
     if (rawUser) {
       const parsedUser = JSON.parse(rawUser);
       if (parsedUser?.id) {
@@ -269,6 +269,28 @@ export async function updateCommunityGroupPrivacy({ groupId, privacy }) {
   });
 }
 
+export async function updateCommunityGroupSettings({
+  groupId,
+  name,
+  description,
+  rules,
+  privacy,
+  isDiscoverable,
+  postApprovalMode,
+}) {
+  return request(`/api/groups/${encodeURIComponent(groupId)}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify({ name, description, rules, privacy, isDiscoverable, postApprovalMode }),
+  });
+}
+
+export async function togglePinCommunityGroupPost({ groupId, postId, isPinned }) {
+  return request(`/api/groups/${encodeURIComponent(groupId)}/posts/${encodeURIComponent(postId)}/pin`, {
+    method: 'PUT',
+    body: JSON.stringify({ isPinned: Boolean(isPinned) }),
+  });
+}
+
 export async function fetchTrendingHashtags({ userId, limit = 5 } = {}) {
   const query = new URLSearchParams({ limit: String(limit) }).toString();
   return request(`/api/hashtags/trending?${query}`, {
@@ -342,6 +364,17 @@ export async function createComment({ userId, postId, parentId = null, content, 
   });
 }
 
+export async function updateComment({ userId, postId, commentId, content, forceComment = false }) {
+  return request(`/api/posts/${postId}/comments/${commentId}`, {
+    method: 'PUT',
+    headers: userId ? { 'x-user-id': userId } : {},
+    body: JSON.stringify({
+      content,
+      forceComment: Boolean(forceComment),
+    }),
+  });
+}
+
 export async function updatePostReaction({ userId, postId, type, action }) {
   const resolvedAction = action || (type ? 'set' : 'remove');
   return request(`/api/posts/${postId}/reaction`, {
@@ -375,6 +408,13 @@ export async function updateCommentReaction({ userId, postId, commentId, type, a
 export async function toggleSavePostApi(postId) {
   return request(`/api/posts/${postId}/save`, {
     method: 'POST',
+  });
+}
+
+export async function togglePinPostApi(postId, isPinned) {
+  return request(`/api/posts/${postId}/pin`, {
+    method: 'PUT',
+    body: JSON.stringify(isPinned !== undefined ? { isPinned: Boolean(isPinned) } : {}),
   });
 }
 
@@ -551,6 +591,14 @@ export async function updateUserVerificationApi({ targetUserId, isVerified, user
     method: 'PATCH',
     headers: userId ? { 'x-user-id': userId } : {},
     body: JSON.stringify({ isVerified }),
+  });
+}
+
+export async function updateUserTrustScoreApi({ targetUserId, trustScore, reason = '', userId }) {
+  return request(`/api/users/${targetUserId}/trust-score`, {
+    method: 'PATCH',
+    headers: userId ? { 'x-user-id': userId } : {},
+    body: JSON.stringify({ trustScore, reason }),
   });
 }
 
