@@ -300,7 +300,8 @@ export function createReportRepository({ pool }) {
                     await pool.query(
                       `UPDATE posts 
                        SET ai_label = 'Normal', ai_status = 'approved',
-                           image_moderation_status = 'approved', image_moderation_label = 'safe'
+                           image_moderation_status = CASE WHEN image_url IS NOT NULL THEN 'safe' ELSE NULL END,
+                           image_moderation_label = CASE WHEN image_url IS NOT NULL THEN 'safe' ELSE NULL END
                        WHERE id = $1`,
                       [dbRep.target_id]
                     );
@@ -308,7 +309,8 @@ export function createReportRepository({ pool }) {
                     await pool.query(
                       `UPDATE comments 
                        SET ai_label = 'Normal', is_hidden = FALSE,
-                           image_moderation_status = 'approved', image_moderation_label = 'safe'
+                           image_moderation_status = CASE WHEN image_url IS NOT NULL THEN 'safe' ELSE NULL END,
+                           image_moderation_label = CASE WHEN image_url IS NOT NULL THEN 'safe' ELSE NULL END
                        WHERE id = $1`,
                       [dbRep.target_id]
                     );
@@ -371,15 +373,17 @@ export function createReportRepository({ pool }) {
                   const dbImgStatus = finalNewImageLabel === 'Violence' ? 'rejected_admin' : (finalNewImageLabel === 'NSFW' ? 'sensitive' : 'safe');
 
                   if (dbRep.target_type === 'post') {
+                    const isPostHardHidden = finalNewLabel === 'Hate Speech' || isViolence;
+                    const postAiStatus = isPostHardHidden ? 'hidden' : 'approved';
                     if (isImageChanged && finalNewImageLabel) {
                       await pool.query(
-                        `UPDATE posts SET ai_label = $1, ai_status = 'hidden', image_moderation_label = $2, image_moderation_status = $3 WHERE id = $4`,
-                        [finalNewLabel, dbImgLabel, dbImgStatus, dbRep.target_id]
+                        `UPDATE posts SET ai_label = $1, ai_status = $2, image_moderation_label = $3, image_moderation_status = $4, is_pinned = CASE WHEN $2 = 'hidden' THEN FALSE ELSE is_pinned END, pinned_at = CASE WHEN $2 = 'hidden' THEN NULL ELSE pinned_at END WHERE id = $5`,
+                        [finalNewLabel, postAiStatus, dbImgLabel, dbImgStatus, dbRep.target_id]
                       );
                     } else {
                       await pool.query(
-                        `UPDATE posts SET ai_label = $1, ai_status = 'hidden' WHERE id = $2`,
-                        [finalNewLabel, dbRep.target_id]
+                        `UPDATE posts SET ai_label = $1, ai_status = $2, is_pinned = CASE WHEN $2 = 'hidden' THEN FALSE ELSE is_pinned END, pinned_at = CASE WHEN $2 = 'hidden' THEN NULL ELSE pinned_at END WHERE id = $3`,
+                        [finalNewLabel, postAiStatus, dbRep.target_id]
                       );
                     }
                   } else if (dbRep.target_type === 'comment') {

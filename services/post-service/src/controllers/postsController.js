@@ -87,6 +87,20 @@ export function mapPostToResponse(post, viewerId = null) {
     myReaction: post.my_reaction || null,
     sharesCount: post.shares_count || 0,
     isSaved: Boolean(post.is_saved || post.isSaved),
+    ...((Object.prototype.hasOwnProperty.call(post, 'is_pinned') || Object.prototype.hasOwnProperty.call(post, 'isPinned'))
+      ? {
+          isPinned:
+            Boolean(post.is_pinned || post.isPinned) &&
+            post.ai_status !== 'hidden' &&
+            !['pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final'].includes(post.image_moderation_status),
+          pinnedAt:
+            Boolean(post.is_pinned || post.isPinned) &&
+            post.ai_status !== 'hidden' &&
+            !['pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final'].includes(post.image_moderation_status)
+              ? (post.pinned_at || post.pinnedAt || null)
+              : null,
+        }
+      : {}),
     comments: (post.comments || []).map((c) => ({
       id: String(c.id),
       parentId: c.parentId ? String(c.parentId) : (c.parent_id ? String(c.parent_id) : null),
@@ -688,6 +702,136 @@ export function createPostsController({ postService, postRepository, imageModera
       }
     },
 
+    async editComment(req, res, next) {
+      try {
+        const { postId, commentId } = req.params;
+        const { content, forceComment } = req.body || {};
+
+        if (!req.user?.id) {
+          return res.status(401).json({ success: false, message: 'Bạn cần đăng nhập để chỉnh sửa bình luận.' });
+        }
+        if (req.user?.status === 'banned') {
+          return res.status(403).json({ success: false, message: 'Tài khoản của bạn đã bị khóa, không thể chỉnh sửa bình luận.' });
+        }
+        if (req.user?.status === 'cooldown' && req.user?.cooldown_until && new Date(req.user.cooldown_until) > new Date()) {
+          return res.status(403).json({ success: false, message: 'Bạn đang trong thời gian bị hạn chế bình luận.' });
+        }
+
+        const existing = await postRepository.findCommentById(commentId);
+        const normalizedPostId = Number(String(postId).replace(/^post-/, ''));
+        if (!existing || (Number.isInteger(normalizedPostId) && Number(existing.post_id) !== normalizedPostId)) {
+          return res.status(404).json({ success: false, message: 'Không tìm thấy bình luận.' });
+        }
+        if (String(existing.author_id) !== String(req.user.id)) {
+          return res.status(403).json({ success: false, message: 'Bạn chỉ có thể chỉnh sửa bình luận của chính mình.' });
+        }
+        if (existing.is_hidden || existing.ai_status === 'hidden' || existing.image_moderation_status === 'rejected_final') {
+          return res.status(403).json({ success: false, message: 'Bình luận đang bị ẩn nên không thể chỉnh sửa.' });
+        }
+
+        const normalizedContent = typeof content === 'string' ? content.trim() : '';
+        if (!normalizedContent && !existing.image_url) {
+          return res.status(400).json({ success: false, message: 'Nội dung bình luận không được để trống.' });
+        }
+
+        const textMod = normalizedContent
+          ? await moderateTextContent(normalizedContent)
+          : { label: 'Normal', confidence: 1.0 };
+        const harmonized = harmonizeModeration({
+          textMod,
+          imageModeration: null,
+          contentType: 'comment',
+        });
+
+        const isTextViolation = textMod && ['Violence', 'Hate Speech', 'Toxic'].includes(textMod.label);
+        if ((isTextViolation || harmonized.applyCooldown) && !forceComment) {
+          return res.status(200).json({
+            success: true,
+            nudge: true,
+            warningType: harmonized.finalLabel === 'Violence' ? 'violence' : harmonized.finalLabel === 'Hate Speech' ? 'hate_speech' : 'toxic',
+            predictedLabel: harmonized.finalLabel || textMod?.label || 'Toxic',
+            message: 'Chúng tôi nhận thấy nội dung chỉnh sửa bình luận có thể chứa từ ngữ tiêu cực hoặc vi phạm. Bạn có muốn xem lại trước khi lưu không?',
+          });
+        }
+
+        const updated = await postRepository.updateComment({
+          postId,
+          commentId,
+          authorId: req.user.id,
+          content: normalizedContent,
+          aiLabel: harmonized.finalLabel || 'Normal',
+          aiConfidence: harmonized.confidence ?? 0.99,
+          isHidden: Boolean(harmonized.isHidden),
+          isSoftHidden: Boolean(harmonized.isSoftHidden),
+          aiStatus: harmonized.aiStatus || 'approved',
+        });
+
+        if (!updated) {
+          return res.status(404).json({ success: false, message: 'Không thể cập nhật bình luận.' });
+        }
+
+        // Trừ phần chênh lệch điểm uy tín nếu chỉnh sửa làm tăng mức độ vi phạm (Normal -> Toxic/Hate Speech/Violence)
+        const prevDeduction = calculateTrustDeduction(existing.ai_label || 'Normal', existing.image_moderation_status || 'safe');
+        const targetDeduction = calculateTrustDeduction(harmonized.finalLabel || 'Normal', 'safe');
+        const deltaDeduction = Math.max(0, targetDeduction - prevDeduction);
+        if (deltaDeduction > 0 && postRepository.pool) {
+          try {
+            await applyTrustPenalty({
+              pool: postRepository.pool,
+              userId: req.user.id,
+              amount: deltaDeduction,
+              reason: `Chỉnh sửa bình luận tăng mức độ vi phạm (${existing.ai_label || 'Normal'} -> ${harmonized.finalLabel})`,
+              actionType: 'comment_edit_violation',
+              contentId: updated.id || commentId,
+            });
+          } catch (trustErr) {
+            console.error('Lỗi trừ điểm uy tín khi chỉnh sửa bình luận:', trustErr.message);
+          }
+        }
+
+        const resolvedParentId = updated.parent_id ? String(updated.parent_id) : null;
+        const commentData = {
+          id: String(updated.id),
+          parentId: resolvedParentId,
+          parent_id: resolvedParentId,
+          author: {
+            id: updated.author_id,
+            name: updated.full_name,
+            avatar: updated.avatar_url,
+            isVerified: Boolean(updated.is_verified),
+          },
+          content: updated.content,
+          image: updated.image_url || null,
+          is_hidden: Boolean(updated.is_hidden),
+          isHidden: Boolean(updated.is_hidden),
+          is_soft_hidden: Boolean(updated.is_soft_hidden),
+          isSoftHidden: Boolean(updated.is_soft_hidden),
+          ai_label: updated.ai_label,
+          aiLabel: updated.ai_label,
+          ai_status: updated.ai_status,
+          aiStatus: updated.ai_status,
+          time: formatRelativeTime(updated.created_at),
+          createdAt: updated.created_at,
+        };
+
+        if (!harmonized.isHidden) {
+          realtimeService.broadcast({
+            type: 'COMMENT_UPDATED',
+            postId: String(postId),
+            comment: commentData,
+          });
+        }
+
+        return res.json({
+          success: true,
+          message: 'Cập nhật bình luận thành công',
+          data: commentData,
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+
     async sharePost(req, res, next) {
       try {
         const { postId } = req.params;
@@ -741,6 +885,28 @@ export function createPostsController({ postService, postRepository, imageModera
         const mapped = posts.map((p) => mapPostToResponse(p, req.user.id));
         return res.status(200).json({
           success: true,
+          data: mapped,
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+
+    async togglePinPost(req, res, next) {
+      try {
+        const { postId } = req.params;
+        const { isPinned } = req.body || {};
+        const updated = await postService.togglePinPost({
+          user: req.user,
+          postId,
+          isPinned,
+        });
+        const mapped = mapPostToResponse(updated, req.user?.id);
+        return res.status(200).json({
+          success: true,
+          isPinned: Boolean(mapped.isPinned),
+          pinnedAt: mapped.pinnedAt || null,
+          message: mapped.isPinned ? 'Đã ghim bài viết lên đầu trang cá nhân' : 'Đã bỏ ghim bài viết khỏi trang cá nhân',
           data: mapped,
         });
       } catch (error) {

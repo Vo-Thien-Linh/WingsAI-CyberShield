@@ -1,15 +1,20 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X, ShieldQuestion, Send, CheckCircle2, AlertOctagon, HelpCircle, Sparkles } from 'lucide-react';
 
 export default function AppealModal({ isOpen, onClose, contentItem, currentUser, onSubmitAppeal }) {
   const [appealReason, setAppealReason] = useState('');
   const [isSubmitted, setIsSubmitted] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
 
   if (!isOpen || !contentItem) return null;
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!appealReason.trim()) return;
+    if (!appealReason.trim() || isSubmitting) return;
+    setSubmitError('');
+    setIsSubmitting(true);
 
     const appealData = {
       id: `app-${Date.now()}`,
@@ -32,13 +37,20 @@ export default function AppealModal({ isOpen, onClose, contentItem, currentUser,
       createdAt: 'Vừa xong'
     };
 
-    onSubmitAppeal(appealData);
-    setIsSubmitted(true);
-    setTimeout(() => {
-      setIsSubmitted(false);
-      setAppealReason('');
-      onClose();
-    }, 1500);
+    try {
+      await onSubmitAppeal(appealData);
+      setIsSubmitted(true);
+      setTimeout(() => {
+        setIsSubmitted(false);
+        setAppealReason('');
+        setSubmitError('');
+        onClose();
+      }, 1500);
+    } catch (err) {
+      setSubmitError(err?.message || 'Không thể gửi đơn khiếu nại. Vui lòng thử lại.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const getBadgeColor = (label) => {
@@ -50,8 +62,8 @@ export default function AppealModal({ isOpen, onClose, contentItem, currentUser,
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+  const modalContent = (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
       <div className="w-full max-w-lg bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]">
         
         {/* Header */}
@@ -172,6 +184,12 @@ export default function AppealModal({ isOpen, onClose, contentItem, currentUser,
                 />
               </div>
 
+              {submitError && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-semibold text-rose-700">
+                  {submitError}
+                </div>
+              )}
+
               {/* Nút hành động */}
               <div className="pt-2 flex items-center justify-end gap-2.5 border-t border-slate-100">
                 <button
@@ -183,11 +201,11 @@ export default function AppealModal({ isOpen, onClose, contentItem, currentUser,
                 </button>
                 <button
                   type="submit"
-                  disabled={!appealReason.trim()}
+                  disabled={!appealReason.trim() || isSubmitting}
                   className="px-5 py-2 text-xs font-bold bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 text-white rounded-xl shadow-sm transition flex items-center gap-1.5 cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>Gửi Đơn Khiếu Nại</span>
+                  <span>{isSubmitting ? 'Đang gửi...' : 'Gửi Đơn Khiếu Nại'}</span>
                 </button>
               </div>
 
@@ -199,4 +217,6 @@ export default function AppealModal({ isOpen, onClose, contentItem, currentUser,
       </div>
     </div>
   );
+
+  return typeof document !== 'undefined' ? createPortal(modalContent, document.body) : modalContent;
 }

@@ -1,5 +1,28 @@
 export function isOwnPost(post, currentUser) {
-  return Boolean(post?.author?.id && currentUser?.id && String(post.author.id) === String(currentUser.id));
+  const authorId = post?.author?.id ?? post?.author_id;
+  return Boolean(authorId && currentUser?.id && String(authorId) === String(currentUser.id));
+}
+
+export function isHardHiddenViolationPost(post) {
+  if (!post) return true;
+  if (
+    post.isHidden ||
+    post.is_hidden ||
+    post.isHardHidden ||
+    post.moderationStatus === 'hidden' ||
+    post.ai_status === 'hidden' ||
+    post.aiStatus === 'hidden' ||
+    post.aiStatusValue === 'hidden' ||
+    post.aiStatus?.status === 'hidden'
+  ) {
+    return true;
+  }
+  const imageStatus = post.imageModeration?.status || post.image_moderation_status;
+  return ['pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final'].includes(imageStatus);
+}
+
+export function canPinPost(post, currentUser) {
+  return isOwnPost(post, currentUser) && !isHardHiddenViolationPost(post);
 }
 
 export function canEditPost(post, currentUser) {
@@ -42,6 +65,8 @@ export function applyUpdatedPostToList(posts, updatedPost) {
       image_moderation_label: updatedPost.image_moderation_label ?? post.image_moderation_label,
       comments: updatedPost.comments ?? post.comments,
       commentsCount: updatedPost.commentsCount ?? updatedPost.comments_count ?? post.commentsCount,
+      isPinned: updatedPost.isPinned !== undefined ? Boolean(updatedPost.isPinned) : (updatedPost.is_pinned !== undefined ? Boolean(updatedPost.is_pinned) : Boolean(post.isPinned || post.is_pinned)),
+      pinnedAt: updatedPost.pinnedAt !== undefined ? updatedPost.pinnedAt : (updatedPost.pinned_at !== undefined ? updatedPost.pinned_at : (post.pinnedAt ?? post.pinned_at ?? null)),
       inlineNotice: updatedPost.inlineNotice ?? post.inlineNotice ?? null,
     };
   });

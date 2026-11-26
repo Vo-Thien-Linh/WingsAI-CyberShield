@@ -593,5 +593,57 @@ export function createPostService({ postRepository, moderationHook, imageModerat
 
       return sharedPost;
     },
+
+    async togglePinPost({ user, postId, isPinned }) {
+      if (!user?.id) {
+        const error = new Error('Bạn cần đăng nhập để ghim bài viết');
+        error.statusCode = 401;
+        throw error;
+      }
+
+      const existingPost = postRepository.findByIdForOwnerAction
+        ? await postRepository.findByIdForOwnerAction(postId)
+        : await postRepository.findById(postId, user.id);
+
+      if (!existingPost || existingPost.image_moderation_status === 'rejected_final') {
+        const error = new Error('Bài viết không tồn tại');
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (String(existingPost.author_id) !== String(user.id)) {
+        const error = new Error('Bạn chỉ có thể ghim bài viết trên trang cá nhân của chính mình');
+        error.statusCode = 403;
+        throw error;
+      }
+
+      const nextPinned = isPinned !== undefined ? Boolean(isPinned) : !Boolean(existingPost.is_pinned);
+
+      if (nextPinned) {
+        const isHardHiddenByAi = existingPost.ai_status === 'hidden';
+        const isHardHiddenByImage = ['pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final'].includes(
+          existingPost.image_moderation_status
+        );
+        if (isHardHiddenByAi || isHardHiddenByImage) {
+          const error = new Error('Không thể ghim bài viết đang bị ẩn hoặc đang chờ xử lý do vi phạm tiêu chuẩn cộng đồng');
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+
+      const updatedPost = await postRepository.setPostPinned({
+        postId,
+        authorId: user.id,
+        isPinned: nextPinned,
+      });
+
+      if (!updatedPost) {
+        const error = new Error('Không thể cập nhật trạng thái ghim bài viết');
+        error.statusCode = 409;
+        throw error;
+      }
+
+      return updatedPost;
+    },
   };
 }

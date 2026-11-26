@@ -154,6 +154,12 @@ export function createUserRepository({ pool }) {
     },
 
     async findUserPosts(userId, viewerId) {
+      try {
+        await pool.query(`
+          ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE;
+          ALTER TABLE posts ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ DEFAULT NULL;
+        `);
+      } catch {}
       // Lấy bài viết của một user cụ thể (kèm thông tin bài gốc nếu là bài chia sẻ)
       const result = await pool.query(
         `SELECT
@@ -164,6 +170,8 @@ export function createUserRepository({ pool }) {
            p.image_moderation_appealed_at,
            p.likes_count, p.comments_count, p.shares_count,
            p.created_at, p.original_post_id,
+           COALESCE(p.is_pinned, FALSE) AS is_pinned,
+           p.pinned_at,
            u.username, u.full_name, u.avatar_url, u.is_verified,
            orig_p.id AS orig_id,
            orig_p.content AS orig_content,
@@ -185,7 +193,16 @@ export function createUserRepository({ pool }) {
          LEFT JOIN users orig_u ON orig_u.id = orig_p.author_id
          WHERE p.author_id = $1
            AND ${buildPostVisibilityPredicate('$2')}
-         ORDER BY p.created_at DESC`,
+         ORDER BY
+           CASE
+             WHEN COALESCE(p.is_pinned, FALSE) = TRUE
+               AND COALESCE(p.ai_status, 'approved') != 'hidden'
+               AND COALESCE(p.image_moderation_status, '') NOT IN ('pending_review', 'rejected_hold', 'rejected_admin', 'appeal_pending', 'rejected_final')
+             THEN 1
+             ELSE 0
+           END DESC,
+           p.pinned_at DESC NULLS LAST,
+           p.created_at DESC`,
         [userId, viewerId]
       );
 
@@ -479,6 +496,65 @@ export function createUserRepository({ pool }) {
       );
 
       return updateResult.rows[0];
+    },
+
+    async updateTrustScore({ targetUserId, trustScore, reason = '', actorId }) {
+      const user = await this.findById(targetUserId);
+      if (!user) {
+        const error = new Error('Không tìm thấy người dùng');
+        error.statusCode = 404;
+        throw error;
+      }
+
+      const oldScore = user.trust_score != null ? Number(user.trust_score) : 100;
+      const nextScore = Math.max(0, Math.min(100, Math.round(Number(trustScore))));
+      const changeAmount = nextScore - oldScore;
+      const cleanReason = String(reason || '').trim() || 'Quản trị viên tinh chỉnh điểm uy tín';
+
+      const updateResult = await pool.query(
+        `UPDATE users
+         SET trust_score = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2
+         RETURNING id, username, email, full_name, avatar_url, role, status, is_verified, trust_score`,
+        [nextScore, targetUserId]
+      );
+
+      const updatedUser = updateResult.rows[0];
+
+      if (changeAmount !== 0) {
+        try {
+          await pool.query(
+            `INSERT INTO user_trust_logs (user_id, change_amount, new_score, reason, action_type)
+             VALUES ($1, $2, $3, $4, 'admin_adjust')`,
+            [targetUserId, changeAmount, nextScore, cleanReason]
+          );
+        } catch (logErr) {
+          console.warn('Không thể ghi log tinh chỉnh điểm uy tín:', logErr.message);
+        }
+
+        try {
+          const directionText = changeAmount > 0
+            ? `đã được Quản trị viên cộng thêm ${changeAmount} điểm uy tín`
+            : `đã bị Quản trị viên điều chỉnh giảm ${Math.abs(changeAmount)} điểm uy tín`;
+          await pool.query(
+            `INSERT INTO notifications (recipient_id, actor_id, type, content)
+             VALUES ($1, $2, 'system', $3)`,
+            [
+              targetUserId,
+              actorId || null,
+              `Điểm uy tín của bạn ${directionText} (${oldScore} → ${nextScore}/100). Lý do: ${cleanReason}`,
+            ]
+          );
+        } catch (notifErr) {
+          console.warn('Không thể gửi thông báo tinh chỉnh điểm uy tín:', notifErr.message);
+        }
+      }
+
+      return {
+        ...updatedUser,
+        old_score: oldScore,
+        change_amount: changeAmount,
+      };
     },
 
     async updateSanctionStatus({ targetUserId, action, durationDays = null, reason = '', actorId }) {
